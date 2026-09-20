@@ -114,13 +114,15 @@ def image_statistics(episodes):
 
 @dataclass(frozen=True)
 class TianjiFrames(FrameSequence):
+    """Lossless RGB transport to the backend; only the target video is lossy."""
+
     paths: tuple
     indices: np.ndarray
     camera: str
     width: int
     height: int
     estimated_size_bytes: int
-    encoded_format: str = "jpeg"
+    encoded_format: str = "ppm"
 
     @property
     def frame_count(self):
@@ -131,12 +133,17 @@ class TianjiFrames(FrameSequence):
             raise IndexError("Invalid frame range")
         if start == stop:
             return
-        encoder = av.CodecContext.create("mjpeg", "w")
+        encoder = av.CodecContext.create("ppm", "w")
         encoder.width, encoder.height = self.width, self.height
-        encoder.pix_fmt = "yuvj420p"
+        encoder.pix_fmt = "rgb24"
         encoder.time_base = Fraction(1, 30)
         encoder.thread_count = 1
-        encoder.options = {"qscale": "2"}
+        # PPM transports exact RGB bytes with no rate control or chroma loss.
+        # It also avoids PNG decoder delta-frame state when a backend repeats
+        # an encoded packet without preserving its original keyframe flag.
+        encoder.open()
+        if encoder.options:
+            raise ValueError(f"PPM encoder ignored options: {encoder.options}")
         desired, cursor, batch = self.indices[start:stop], 0, []
         decoded = decode_quad(self.paths)
         try:
@@ -144,9 +151,12 @@ class TianjiFrames(FrameSequence):
                 if index < desired[cursor]:
                     continue
                 tile = crop(frame.to_ndarray(format="rgb24"), self.camera)
-                packets = encoder.encode(av.VideoFrame.from_ndarray(tile, format="rgb24"))
+                image = av.VideoFrame.from_ndarray(tile, format="rgb24")
+                # Every packet is independently decodable, including repeats.
+                image.pict_type = av.video.frame.PictureType.I
+                packets = encoder.encode(image)
                 if len(packets) != 1:
-                    raise ValueError("JPEG encoder did not return one independent frame")
+                    raise ValueError("PPM encoder did not return one independent frame")
                 encoded = bytes(packets[0])
                 while cursor < len(desired) and desired[cursor] == index:
                     batch.append(encoded)

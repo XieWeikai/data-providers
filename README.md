@@ -12,6 +12,8 @@ Tianji provider 支持目标 FPS（默认 50）、必填任务文本、所有信
 
 提供 `tianji-provider check /path/to/recordings --report /path/to/tmp/diagnostics.json` 独立异常检测：默认完整解码视频，检查反馈/视频缺口及数据结构、时钟、标定等问题，逐轨迹继续扫描。检测命令不要求 task，不修改或删除输入。
 
+0.4.0 的直接转换使用无损 RGB 中间帧，避免 JPEG 导致的细节损失。正式数据推荐先运行 `tianji-provider prepare`：原始四宫格完整解码一次，输出四路 H.264 CRF 18 视频并计算图像统计，再由 LeTools 直接封装为目标版本。完整命令和画质/速度验证见 provider 文档。
+
 ## 安装一个 provider
 
 先按 [LeTools 的安装文档](https://github.com/XieWeikai/letools#readme) 安装 LeTools，然后将所需 provider 安装到同一个 Python 环境。对于 `uv tool` 安装的 LeTools：

@@ -37,7 +37,7 @@ def arrow_table(columns):
     return pa.table(arrays)
 
 
-def features(width, height, fps, codec="mjpeg"):
+def features(width, height, fps, codec="ppm"):
     joints = [*[f"left_joint_{i}_rad" for i in range(1, 8)], "left_gripper_normalized",
               *[f"right_joint_{i}_rad" for i in range(1, 8)], "right_gripper_normalized"]
     result = {
@@ -49,7 +49,7 @@ def features(width, height, fps, codec="mjpeg"):
     for key, dtype in GENERATED.items():
         result[key] = {"dtype": dtype, "shape": [1], "names": None}
     for camera in CAMERAS:
-        vi = {"video.fps": fps, "video.codec": codec, "video.pix_fmt": "yuvj420p" if codec == "mjpeg" else "yuv420p", "video.is_depth_map": False, "has_audio": False}
+        vi = {"video.fps": fps, "video.codec": codec, "video.pix_fmt": "rgb24" if codec == "ppm" else "yuv420p", "video.is_depth_map": False, "has_audio": False}
         result[f"observation.image.{camera}"] = {"dtype": "video", "shape": [height, width, 3], "names": ["height", "width", "channels"],
             "info": {"video.height": height, "video.width": width, **vi}, "video_info": vi}
     return result
@@ -64,7 +64,7 @@ class TianjiSource(DatasetSource):
         self._collect_image_stats = _collect_image_stats
 
     def planner_identity(self):
-        return FORMAT, hashlib.sha256(json.dumps(asdict(self.config), sort_keys=True).encode()).hexdigest()
+        return FORMAT + ":ppm-rgb24-v1", hashlib.sha256(json.dumps(asdict(self.config), sort_keys=True).encode()).hexdigest()
 
     @cached_property
     def _loaded(self):

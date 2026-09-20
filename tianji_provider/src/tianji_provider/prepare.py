@@ -14,6 +14,8 @@ from .media import CAMERAS, RGBStatistics, crop, decode_quad
 from .reader import bag_files, discover, video_files
 from .source import FORMAT, TianjiSource, features
 
+H264_OPTIONS = {"preset": "veryfast", "crf": "18", "bf": "0"}
+
 
 def fingerprint(root):
     result = []
@@ -46,8 +48,10 @@ def prepare(root, destination, config):
         raise ValueError("Existing cache belongs to different data/options; choose a new destination")
     if destination.exists():
         raise FileExistsError(f"Refusing to overwrite an existing/incomplete cache: {destination}")
+    alignment_started = time.perf_counter()
     source = TianjiSource(root, config, _collect_image_stats=False)
     episodes = source.episodes
+    alignment_seconds = time.perf_counter() - alignment_started
     destination.mkdir(parents=True)
     started = time.perf_counter()
     entries = []
@@ -62,15 +66,31 @@ def prepare(root, destination, config):
                         "data": str((folder / "data.parquet").relative_to(destination)),
                         "audit": str((folder / "alignment.npz").relative_to(destination)),
                         "videos": {f"observation.image.{c}": str((folder / f"{c}.mp4").relative_to(destination)) for c in CAMERAS}})
+    tables_seconds = time.perf_counter() - started
+    video_started = time.perf_counter()
+    recordings = []
     for bag in discover(root):
         group = [ep for ep in episodes if ep.data_path == bag]
-        print(f"Encoding {bag.name}: {len(group)} segments, {sum(e.length for e in group)} frames", flush=True)
+        frames = sum(e.length for e in group)
+        print(f"Encoding {bag.name}: {len(group)} episodes, {frames} frames", flush=True)
+        bag_started = time.perf_counter()
         _encode_group(source, group, destination, entries)
+        elapsed = time.perf_counter() - bag_started
+        recordings.append({"bag": bag.name, "frames": frames, "video_seconds": elapsed})
+        print(f"Encoded {bag.name}: {elapsed:.2f} s, {frames / elapsed:.2f} dataset frames/s", flush=True)
+    video_seconds = time.perf_counter() - video_started
     w = source.metadata.features["observation.image.head_left"]["shape"][1]
     h = source.metadata.features["observation.image.head_left"]["shape"][0]
     manifest = {"format": FORMAT, "alignment_config": options, "source_fingerprint": origin,
                 "features": features(w, h, config.fps, "h264"), "episodes": entries, "reports": source.reports,
                 "video_prepare_seconds": time.perf_counter() - started,
+                "timings": {"source_alignment_seconds": alignment_seconds,
+                            "table_write_seconds": tables_seconds,
+                            "video_decode_encode_statistics_seconds": video_seconds,
+                            "recordings": recordings},
+                "video_encoding": {"codec": "h264", "encoder": "libx264", "pixel_format": "yuv420p",
+                                   "crf": 18, "preset": "veryfast", "b_frames": 0,
+                                   "intermediate_lossy_encoding": False},
                 "image_statistics": "RGB channel histograms before H.264 encoding, all selected pixels/frames"}
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
     return manifest
@@ -88,10 +108,14 @@ def _encode_group(source, episodes, destination, entries):
             output = av.open(str(destination / entries[ep.index]["videos"][f"observation.image.{camera}"]), "w")
             stream = output.add_stream("libx264", rate=fps)
             stream.width, stream.height, stream.pix_fmt = first.width, first.height, "yuv420p"
-            stream.options = {"preset": "veryfast", "crf": "18", "bf": "0"}
+            stream.options = H264_OPTIONS.copy()
             stream.codec_context.thread_count = 1
             stream.codec_context.gop_size = fps
             outputs[camera] = (output, stream)
+            # Fail on ignored quality options instead of silently using defaults.
+            output.start_encoding()
+            if stream.codec_context.options:
+                raise ValueError(f"H.264 encoder ignored options: {stream.codec_context.options}")
             histograms[camera] = RGBStatistics()
 
     def finish(ep):

@@ -1,5 +1,33 @@
 # 验证记录
 
+## 0.4.0：无损中间帧与明确的 H.264 画质
+
+旧直接转换路径的 PyAV MJPEG `qscale` 选项没有生效，JPEG 中间帧先损失细节，再由目标 H.264 压缩。0.4.0 改用 RGB24 PPM 作为直接转换的无损中间帧；推荐的显式准备流程直接输出 H.264 CRF 18 / veryfast / yuv420p，并在打开编码器后拒绝未被识别的选项。版本仍兼容合法的 tianji-thor-v2 准备缓存，原始源 planner identity 更新以避免复用旧图像计划。
+
+- 五组测试共 **62 项通过（11.66 秒）**，包括既有对齐、命令补 state、首尾裁剪及异常诊断。
+- 四路相机分别检查全部像素与原始裁剪一致，覆盖跨批次重复帧、切片及新解码器随机读取。测试发现 PNG 在当前后端丢失包 keyframe 标志后不能安全重复解码，因此最终采用独立 RGB PPM 帧。
+- 真实照片细节合成输入覆盖直接路径及准备路径，分别生成 H.264 v2.1 / v3.0；检查全部输出帧的尺寸、50 FPS PTS、画质，并验证两版本选中帧的解码像素一致。测试质量下限分别为 36 dB（当前后端默认 CRF 23）和 39.5 dB（准备流程 CRF 18）。
+- 故障注入证明无效 H.264 编码选项会报错，且不会留下可被当成完整缓存的清单。
+- 既有 LeRobot-to-LeRobot 转换各运行 3 次，1,799 帧、3 个 episode，data/video workers 均为 2。后两次中位数：未加载插件 **0.0953 秒**，加载插件 **0.0884 秒**；全部深度校验通过。小样本未观察到回归，不代表吞吐提升。
+- 重装后在 `/private/tmp` 验证全局命令，`letools providers list` 显示 tianji-provider 0.4.0。测试脚本及所有中间结果保存在开发机 `../tmp`，不随仓库分发。
+
+完整测试命令：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 TMPDIR=/Users/xieweikai/Downloads/tianji_dataset/tmp \
+  /Users/xieweikai/.local/share/uv/tools/letools/bin/python -m pytest \
+  /Users/xieweikai/Downloads/tianji_dataset/tmp/test_tianji_alignment.py \
+  /Users/xieweikai/Downloads/tianji_dataset/tmp/test_tianji_end_to_end.py \
+  /Users/xieweikai/Downloads/tianji_dataset/tmp/test_tianji_hold_trim.py \
+  /Users/xieweikai/Downloads/tianji_dataset/tmp/test_tianji_diagnostics.py \
+  /Users/xieweikai/Downloads/tianji_dataset/tmp/test_tianji_video_quality.py \
+  --basetemp=/Users/xieweikai/Downloads/tianji_dataset/tmp/pytest-ppm-v040 \
+  -o cache_dir=/Users/xieweikai/Downloads/tianji_dataset/tmp/pytest-cache -q
+```
+
+此前格式/帧数/时间戳验证不能证明画面细节没有损失；旧版直接转换结果需要重新生成。以下记录保留其原始验证范围。
+
+
 ## 0.3.0：独立异常检测
 
 新增只读 `tianji-provider check` 命令，默认完整解码视频；逐轨迹继续检查并输出结构化 JSON 报告。复用转换的严格对齐规则，命令暂停填 state 和首尾静止裁剪仅记为 info，不改变原有转换行为。包版本 0.3.0，provider API 2，缓存格式仍为 tianji-thor-v2。
