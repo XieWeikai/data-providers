@@ -12,15 +12,36 @@ def main(argv=None):
     commands = parser.add_subparsers(dest="command", required=True)
     inspect = commands.add_parser("inspect", help="Read-only alignment audit; does not decode/encode full video")
     prepare = commands.add_parser("prepare", help="Prepare aligned Parquet/MP4 cache with one quad decode per bag")
+    check = commands.add_parser("check", help="Report every recording's anomalies without modifying input")
     for command in (inspect, prepare):
         command.add_argument("source", type=Path)
         provider.add_arguments(command)
     inspect.add_argument("--report", type=Path, help="Write detailed JSON report to this explicit path")
     prepare.add_argument("destination", type=Path)
+    check.add_argument("source", type=Path)
+    provider.add_arguments(check, task_required=False)
+    check.add_argument("--report", type=Path, help="Write machine-readable JSON diagnostics")
+    check.add_argument("--deep-video", action=argparse.BooleanOptionalAction, default=True,
+                       help="Decode every video frame to detect corruption and mapping errors (default: enabled)")
     args = parser.parse_args(argv)
     try:
         config = provider.config_from_args(args, None)
-        if args.command == "prepare":
+        if args.command == "check":
+            from .diagnostics import check_dataset
+            def progress(index, total, item):
+                state = "PASS" if item["valid"] else "FAIL"
+                print(f"[{index}/{total}] {item['bag']}: {state}", flush=True)
+                for issue in item["issues"]:
+                    if issue["severity"] == "error":
+                        print(f"  {issue['code']}: {issue.get('topic', '')} {issue['message']}", flush=True)
+            result = check_dataset(args.source, config, deep_video=args.deep_video, progress=progress)
+            if args.report:
+                args.report.parent.mkdir(parents=True, exist_ok=True)
+                args.report.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
+            print(json.dumps({k: v for k, v in result.items() if k not in ("results", "config")}, ensure_ascii=False))
+            if not result["valid"]:
+                parser.exit(1)
+        elif args.command == "prepare":
             from .prepare import prepare as run_prepare
             result = run_prepare(args.source, args.destination, config)
             print(json.dumps({"cache": str(args.destination), "episodes": len(result["episodes"]),

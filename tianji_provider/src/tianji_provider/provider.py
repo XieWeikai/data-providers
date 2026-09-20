@@ -45,9 +45,10 @@ class TianjiProvider(SourceProvider[TianjiConfig]):
     api_version = 2
     config_type = TianjiConfig
 
-    def add_arguments(self, parser):
+    def add_arguments(self, parser, *, task_required=True):
         from argparse import BooleanOptionalAction
-        parser.add_argument("--task", required=True, help="Task instruction stored in LeRobot metadata")
+        parser.add_argument("--task", required=task_required, default=None if task_required else "validation",
+                            help="Task instruction stored in LeRobot metadata")
         parser.add_argument("--fps", type=int, default=50, help="Output FPS (default: 50)")
         parser.add_argument("--gap-policy", choices=("error",), default="error",
                             help="Missing observations fail explicitly; recordings are never split")

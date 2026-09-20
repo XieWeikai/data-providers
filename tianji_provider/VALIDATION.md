@@ -1,5 +1,30 @@
 # 验证记录
 
+## 0.3.0：独立异常检测
+
+新增只读 `tianji-provider check` 命令，默认完整解码视频；逐轨迹继续检查并输出结构化 JSON 报告。复用转换的严格对齐规则，命令暂停填 state 和首尾静止裁剪仅记为 info，不改变原有转换行为。包版本 0.3.0，provider API 2，缓存格式仍为 tianji-thor-v2。
+
+- 四组测试共 **55 项通过**（3.35 秒）。新增诊断测试覆盖真实问题对应的 100.849 ms、687 ms、3.023 s 反馈缺口及 266.667 ms 视频缺口，验证精确位置和受影响采样点；多信号同时中断均被列出，命令长暂停不判错。
+- 合成 ROS 2 MCAP 的完整视频检查通过，76 个视频消息对应 76 个解码帧；检查前后输入文件大小和修改时间不变。缺失目录不会被静默跳过，单条失败后仍继续检查其他录制。
+- 故障注入覆盖数值读取失败原因保留、视频解码失败/尺寸变化、无效四元数、空交集，以及 CLI 的 0/1/2 退出码和快速模式检查范围。已有 v2.1/v3.0 转换、状态补命令和静止裁剪测试同时通过。
+- 既有 LeRobot-to-LeRobot 路径各运行 3 次，1,799 帧，data/video workers 均为 2；后两次中位数为未加载插件 **0.0808 秒**、加载插件 **0.0782 秒**，均通过深度校验。测试期间另有原始录制扫描；小样本未观察到回归，不表示吞吐提升。
+- 重装后从其他目录验证 `letools providers list` 显示 tianji-provider 0.3.0，`tianji-provider check --help` 可调用。LeTools 源码工作区保持无改动。
+- 在删除前完整检测 32 条真实录制，耗时 567.87 秒，63,986 个四宫格视频帧全部解码成功。严格规则恰好检出之前确认的 4 条时间缺口异常，没有新增异常；28 条通过，共 73,215 个输出采样点，首尾裁剪 204 帧，中间丢帧为 0。完整结果保存在 `../tmp/anomaly-check-before-delete-v030.json`。这次运行以退出码 1 正确表示存在异常数据。
+
+测试与产物按要求仅保存在开发机的 `../tmp`，未随仓库分发。当前完整测试命令：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 TMPDIR=/Users/xieweikai/Downloads/tianji_dataset/tmp \
+  /Users/xieweikai/.local/share/uv/tools/letools/bin/python -m pytest \
+  /Users/xieweikai/Downloads/tianji_dataset/tmp/test_tianji_alignment.py \
+  /Users/xieweikai/Downloads/tianji_dataset/tmp/test_tianji_end_to_end.py \
+  /Users/xieweikai/Downloads/tianji_dataset/tmp/test_tianji_hold_trim.py \
+  /Users/xieweikai/Downloads/tianji_dataset/tmp/test_tianji_diagnostics.py \
+  --basetemp=/Users/xieweikai/Downloads/tianji_dataset/tmp/pytest-diagnostics-v030 \
+  -o cache_dir=/Users/xieweikai/Downloads/tianji_dataset/tmp/pytest-cache -q
+```
+
+
 ## 0.2.0：保持单条轨迹、命令补 state、首尾裁剪
 
 当前默认行为：一条录制一个 episode；命令暂停按侧用同帧反馈补 action；只裁首尾静止区间。关节/夹爪反馈缺失不会被误判为静止尾部；保留区间内其他观测缺失明确报错。包版本 0.2.0，provider API 2，缓存格式 tianji-thor-v2；旧版缓存被拒绝。
