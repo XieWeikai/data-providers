@@ -1,0 +1,36 @@
+# Python build products and environments
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+build/
+dist/
+
+# Local recordings, generated datasets and temporary artifacts
+tmp/
+outputs/
+cache/
+*.mcap
+*.bag
+*.db3
+*.parquet
+*.mp4
+*.avi
+*.h264
+*.npz
+*.npy
+*.log
+
+# Machine-local configuration
+.DS_Store
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
