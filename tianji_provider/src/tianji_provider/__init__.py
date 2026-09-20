@@ -4,4 +4,4 @@
 # importing provider submodules so direct Python API imports are also safe.
 import letools as _letools
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

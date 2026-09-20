@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tianji-provider"
-version = "0.1.0"
+version = "0.2.0"
 description = "Timestamp-aligned Tianji/Marvin Pro MCAP source for LeTools"
 requires-python = ">=3.12"
 dependencies = ["letools>=0.1.0", "mcap>=1.3,<2", "mcap-ros2-support>=0.5,<1", "scipy>=1.14,<2", "PyYAML>=6,<7"]
