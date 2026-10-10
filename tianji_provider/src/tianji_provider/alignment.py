@@ -48,6 +48,41 @@ COMMAND_STATE = {
 FEEDBACK_TOPICS = ("/tj/joint_states", "/info/gripper_feedback_L", "/info/gripper_feedback_R")
 
 
+def command_age_ns(topic, config):
+    age = config.gripper_max_gap_ms if "gripper_target" in topic else config.command_max_age_ms
+    return round(age * 1e6)
+
+
+def command_samples(signal, grid, max_age_ns):
+    """Causal lookup independent of a command stream's first/last timestamp.
+
+    Empty streams and times before the first command have no usable sample.
+    The last command remains valid through its inclusive age limit only.
+    """
+    indices = np.searchsorted(signal.times, grid, side="right") - 1
+    fresh = np.zeros(len(grid), dtype=bool)
+    present = indices >= 0
+    fresh[present] = grid[present] - signal.times[indices[present]] <= max_age_ns
+    return indices, fresh
+
+
+def candidate_interval(signals, ranges, video_times, config):
+    """Intersect observations with the envelope of the command union.
+
+    Interior holes in that union are checked on retained samples by align;
+    they never silently split episodes or remove individual rows.
+    """
+    observations = [v for k, v in ranges.items() if k not in COMMAND_STATE]
+    observations.append([int(video_times[0]), int(video_times[-1]), len(video_times)])
+    commands = [(int(signals[k].times[0]), int(signals[k].times[-1]) + command_age_ns(k, config))
+                for k in COMMAND_STATE if len(signals[k].times)]
+    if not commands:
+        raise ValueError("No recorded control command: at least one arm/gripper command topic is required")
+    start = max(max(v[0] for v in observations), min(v[0] for v in commands))
+    end = min(min(v[1] for v in observations), max(v[1] for v in commands))
+    return start, end
+
+
 def moving_bounds(times, feedback, joint_threshold, gripper_threshold):
     """Find motion relative to stable edge poses; retain one boundary sample.
 
@@ -76,11 +111,10 @@ def command_or_state(signal, grid, aligned_state, max_age_ns):
     target. Each arm/gripper falls back independently, and a new command takes
     effect at its timestamp. Missing command packets never remove output rows.
     """
-    indices = previous_indices(signal.times, grid)
-    fallback = grid - signal.times[indices] > max_age_ns
-    values = signal.values[indices].copy()
-    values[fallback] = aligned_state[fallback]
-    return values, fallback
+    indices, fresh = command_samples(signal, grid, max_age_ns)
+    values = aligned_state.copy()
+    values[fresh] = signal.values[indices[fresh]]
+    return values, ~fresh
 
 
 def interpolate(times, values, grid, fps, max_gap_ns, mode="lowpass"):
@@ -140,8 +174,7 @@ def pose_interpolate(signal, grid, fps, max_gap_ns, mode):
 
 def align(signals, ranges, video_times, config):
     ranges = {**ranges, "video": [int(video_times[0]), int(video_times[-1]), len(video_times)]}
-    start = max(v[0] for v in ranges.values())
-    end = min(v[1] for v in ranges.values())
+    start, end = candidate_interval(signals, ranges, video_times, config)
     grid = uniform_grid(start, end, config.fps)
     if len(grid) < 2:
         raise ValueError("The common interval must contain at least two output frames")
@@ -176,6 +209,12 @@ def align(signals, ranges, video_times, config):
     if failures:
         raise ValueError(f"Missing observations exceed --max-gap-ms={config.max_gap_ms:g}; "
                          f"refusing to split, drop frames or invent feedback: {failures}")
+    command_counts = sum(command_samples(signals[k], grid, command_age_ns(k, config))[1].astype(np.int8)
+                         for k in COMMAND_STATE)
+    if np.any(command_counts == 0):
+        raise ValueError(f"No fresh control command at {int(np.sum(command_counts == 0))} output frames; "
+                         "at least one arm/gripper command topic is required at each retained time; "
+                         "refusing to split or drop frames")
     resampled = {k: v[trim_start:trim_stop] for k, v in feedback_values.items()}
     for topic, s in signals.items():
         if topic in COMMAND_STATE or topic in resampled:
@@ -187,9 +226,8 @@ def align(signals, ranges, video_times, config):
         resampled[topic] = value
     fallback_counts, fallback_ranges = {}, {}
     for topic, (state_topic, columns) in COMMAND_STATE.items():
-        age = config.gripper_max_gap_ms if "gripper_target" in topic else config.command_max_age_ms
         resampled[topic], fallback = command_or_state(
-            signals[topic], grid, resampled[state_topic][:, columns], round(age * 1e6))
+            signals[topic], grid, resampled[state_topic][:, columns], command_age_ns(topic, config))
         fallback_counts[topic] = int(np.sum(fallback))
         fallback_ranges[topic] = [{"start_ns": int(grid[a]), "end_ns": int(grid[b-1]), "frames": b-a}
                                   for a, b in runs(fallback)]
@@ -217,6 +255,9 @@ def align(signals, ranges, video_times, config):
         "segments": [{"start_ns": int(grid[0]), "end_ns": int(grid[-1]), "frames": len(grid)}],
         "invalid_frames_by_signal": rejected, "signal_ranges_ns": ranges,
         "command_fallback_policy": "current_aligned_state",
+        "command_coverage_policy": "at_least_one_fresh_command",
+        "minimum_fresh_command_topics": int(command_counts.min()),
+        "empty_command_topics": [k for k in COMMAND_STATE if not len(signals[k].times)],
         "command_fallback_frames": fallback_counts, "command_fallback_ranges": fallback_ranges,
         "video_max_age_ms": float(np.max(grid - video_times[video_indices]) / 1e6),
     }

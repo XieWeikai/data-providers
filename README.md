@@ -8,7 +8,7 @@
 |---|---|---|---|
 | `tianji_provider/` | `tianji` | Tianji / Marvin Pro Thor 的 ROS 2 MCAP 轨迹与四宫格 H.264 视频 | [使用说明](tianji_provider/README.md) · [验证记录](tianji_provider/VALIDATION.md) |
 
-Tianji provider 支持目标 FPS（默认 50）、必填任务文本、所有信号的时间交集，以及四路相机拆分。每条录制保持为一个 episode，命令暂停时用同帧 state 补 action，默认裁剪首尾静止部分并保留中途暂停。输出由 LeTools 的 LeRobot v2.1 / v3.0 后端负责。
+Tianji provider 支持目标 FPS（默认 50）、必填任务文本、观测与视频的时间交集，以及四路相机拆分。0.5.0 起四路控制命令取有效覆盖并集，每个保留时刻至少一路有效，其余以同帧 state 补 action，支持某一路整段无命令的单臂操作。每条录制保持为一个 episode，默认裁剪首尾静止部分并保留中途暂停。输出由 LeTools 的 LeRobot v2.1 / v3.0 后端负责；时间轴规则已变更，旧准备缓存需要重建。
 
 提供 `tianji-provider check /path/to/recordings --report /path/to/tmp/diagnostics.json` 独立异常检测：默认完整解码视频，检查反馈/视频缺口及数据结构、时钟、标定等问题，逐轨迹继续扫描。检测命令不要求 task，不修改或删除输入。
 

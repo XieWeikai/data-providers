@@ -10,6 +10,9 @@ import yaml
 from mcap.reader import make_reader
 from mcap_ros2.decoder import DecoderFactory
 
+# Only action-producing command streams may be empty; observations stay strict.
+from .alignment import COMMAND_STATE
+
 VIDEO_TOPIC = "/recorder/quad_tile/compressed_undistorted"
 JOINT_NAMES = tuple(f"Joint{i}_{side}" for side in ("L", "R") for i in range(1, 8))
 TYPES = {
@@ -92,7 +95,8 @@ def normalize_signal(times, values, topic):
 
 def read_numeric(bag):
     metadata = yaml.safe_load((bag / "data/metadata.yaml").read_text())["rosbag2_bagfile_information"]
-    empty = [v["topic_metadata"]["name"] for v in metadata.get("topics_with_message_count", []) if v["message_count"] == 0]
+    empty = [v["topic_metadata"]["name"] for v in metadata.get("topics_with_message_count", [])
+             if v["message_count"] == 0 and v["topic_metadata"]["name"] not in COMMAND_STATE]
     if empty:
         raise ValueError(f"{bag.name}: cannot intersect empty recorded topics: {empty}")
     samples = {k: ([], []) for k in TYPES if k != "/info/web_gripper"}
@@ -154,7 +158,13 @@ def read_numeric(bag):
         samples[topic][1].append(value)
     if calibration is None:
         raise ValueError(f"{bag.name}: /info/web_gripper calibration is required; no guessed motor limits")
-    result = {k: normalize_signal(*v, k) for k, v in samples.items()}
+    result = {}
+    for topic, (times, values) in samples.items():
+        if topic in COMMAND_STATE and not times:
+            width = 7 if "/joint_cmd_" in topic else 1
+            result[topic] = Signal(np.empty(0, dtype=np.int64), np.empty((0, width), dtype=np.float64))
+        else:
+            result[topic] = normalize_signal(times, values, topic)
     # Express feedback in the driver's recorded normalized target coordinate.
     # Do not clip small telemetry overshoots; retain measured information.
     for side, (lo, hi) in zip(("L", "R"), calibration):

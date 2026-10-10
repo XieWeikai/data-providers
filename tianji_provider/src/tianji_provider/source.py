@@ -16,7 +16,7 @@ from .alignment import align
 from .media import CAMERAS, TianjiFrames, dimensions, image_statistics
 from .reader import bag_files, discover, read_numeric, read_video_times, video_files
 
-FORMAT = "tianji-thor-v2"
+FORMAT = "tianji-thor-v3"
 GENERATED = {"timestamp": "float32", "frame_index": "int64", "episode_index": "int64", "index": "int64", "task_index": "int64"}
 
 
@@ -122,7 +122,7 @@ class TianjiSource(DatasetSource):
     def _load_prepared(self):
         manifest = json.loads((self.root / "tianji-cache.json").read_text())
         if manifest.get("format") != FORMAT:
-            raise ValueError("Unsupported Tianji cache version; rebuild with state fallback and one episode per recording")
+            raise ValueError("Unsupported Tianji cache version; rebuild with command-union timing and state fallback")
         semantic = asdict(self.config)
         semantic.pop("task")
         if semantic != manifest["alignment_config"]:

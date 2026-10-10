@@ -7,7 +7,8 @@ import time
 import numpy as np
 
 from . import __version__
-from .alignment import COMMAND_STATE, FEEDBACK_TOPICS, align, previous_indices, runs, uniform_grid
+from .alignment import (COMMAND_STATE, FEEDBACK_TOPICS, align, candidate_interval,
+                        command_age_ns, command_samples, runs, uniform_grid)
 from .media import decode_quad, dimensions
 from .reader import read_numeric, read_video_times, video_files
 
@@ -42,25 +43,33 @@ def timing_issues(signals, ranges, video_times, config, alignment=None):
     block conversion when they affect retained output points. Command pauses
     are informational because the converter supplies the same-frame state.
     """
-    all_ranges = {**ranges, "video": [int(video_times[0]), int(video_times[-1]), len(video_times)]}
-    start, end = max(v[0] for v in all_ranges.values()), min(v[1] for v in all_ranges.values())
+    start, end = candidate_interval(signals, ranges, video_times, config)
     grid = uniform_grid(start, end, config.fps)
     output = grid
     if alignment is not None:
         trim = alignment["trim"]
         output = grid[(grid >= trim["output_start_ns"]) & (grid <= trim["output_end_ns"])]
     issues = []
+    command_counts = np.zeros(len(output), dtype=np.int8)
+    for topic in COMMAND_STATE:
+        signal = signals[topic]
+        age_ns = command_age_ns(topic, config)
+        indices, fresh = command_samples(signal, output, age_ns)
+        command_counts += fresh
+        for a, b in runs(~fresh):
+            issues.append(_issue("command_pause_filled", "info", "Absent/stale command uses same-frame state",
+                topic=topic, start_ns=int(output[a]), end_ns=int(output[b-1]),
+                start_seconds=float((output[a]-start)/1e9), end_seconds=float((output[b-1]-start)/1e9),
+                affected_frames=b-a, threshold_ms=age_ns / 1e6,
+                last_message_ns=int(signal.times[indices[a]]) if indices[a] >= 0 else None,
+                command_stream_empty=not len(signal.times), handling="current_aligned_state"))
+    for a, b in runs(command_counts == 0):
+        issues.append(_issue("command_coverage_gap", "error", "All arm/gripper commands are absent or stale",
+            start_ns=int(output[a]), end_ns=int(output[b-1]),
+            start_seconds=float((output[a]-start)/1e9), end_seconds=float((output[b-1]-start)/1e9),
+            affected_frames=b-a, handling="reject_recording"))
     for topic, times in [*[(k, s.times) for k, s in signals.items()], ("video", video_times)]:
         if topic in COMMAND_STATE:
-            age_ms = config.gripper_max_gap_ms if "gripper_target" in topic else config.command_max_age_ms
-            indices = previous_indices(times, output)
-            fallback = output - times[indices] > round(age_ms * 1e6)
-            for a, b in runs(fallback):
-                issues.append(_issue("command_pause_filled", "info", "Paused command uses same-frame state",
-                    topic=topic, start_ns=int(output[a]), end_ns=int(output[b-1]),
-                    start_seconds=float((output[a]-start)/1e9), end_seconds=float((output[b-1]-start)/1e9),
-                    affected_frames=b-a, threshold_ms=age_ms,
-                    last_message_ns=int(times[indices[a]]), handling="current_aligned_state"))
             continue
         threshold = round(config.max_gap_ms * 1e6)
         scope = grid if topic in FEEDBACK_TOPICS else output
