@@ -35,6 +35,8 @@
 
 本包没有原始 MCAP 编辑、自动删除异常录制、机器人控制、动作成功识别、训练或标注界面。Visualizer、Annotation、Doctor、可选 editor 属于其他工具；8095 是单独的 Web 项目。当前明确拒绝分布式执行，仅支持已验证的本地转换。
 
+配套 Web 仓库：[XieWeikai/letools-data-platform](https://github.com/XieWeikai/letools-data-platform)。其部署、网页参数、队列和使用说明独立维护；私有仓库需要 GitHub 访问权限。LeTools 的“输入前端”指本插件提供的 SourceProvider/DatasetSource，“输出后端”指 LeRobot v2.1/v3.0 写入器，与浏览器/FastAPI 的 Web 前后端是不同层次。
+
 ## 当前处理规则
 
 - Task 必填（独立 check 除外）。主 FPS 默认 50，`--wrench-fps` 默认 200；两者均为 1–1000 的整数，wrench-fps 必须不小于 FPS 且为其整数倍。默认力字段为 `observation.wrench_windows`，每行 `[4,12]`。
