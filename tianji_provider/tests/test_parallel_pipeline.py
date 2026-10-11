@@ -72,12 +72,12 @@ def test_failed_video_batch_never_publishes_complete_manifest(tmp_path,monkeypat
         finally:closed.append(True)
     monkeypatch.setattr(prep,'iter_parallel',failing)
     with pytest.raises(RuntimeError,match='Second video failed'):
-        prep.prepare(raw,output,config,workers=2)
+        prep.prepare(raw,output,config,workers=2,video_encoder='libx264')
     assert closed==[True]
     assert not (output/'tianji-cache.json').exists()
     assert (output/'episode_000000/data.parquet').exists()
     with pytest.raises(FileExistsError,match='incomplete cache'):
-        prep.prepare(raw,output,config,workers=1)
+        prep.prepare(raw,output,config,workers=1,video_encoder='libx264')
 
 
 def test_long_videos_start_first_but_manifest_and_stats_keep_source_order(tmp_path,monkeypatch):
@@ -107,7 +107,7 @@ def test_long_videos_start_first_but_manifest_and_stats_keep_source_order(tmp_pa
             yield index,({'bag':job.bag,'frames':ep.length,'video_seconds':1.},
                          {ep.index:{'observation.image.head_left':{'count':[ep.length]}}})
     monkeypatch.setattr(prep,'iter_parallel',scheduled)
-    manifest=prep.prepare(raw,tmp_path/'cache',TianjiConfig(task='test'),workers=2)
+    manifest=prep.prepare(raw,tmp_path/'cache',TianjiConfig(task='test'),workers=2,video_encoder='libx264')
     assert [r['bag'] for r in manifest['timings']['recordings']]==[p.name for p in bags]
     assert [e['index'] for e in manifest['episodes']]==[0,1,2]
     assert [e['stats']['observation.image.head_left']['count'] for e in manifest['episodes']]==[[2],[5],[3]]

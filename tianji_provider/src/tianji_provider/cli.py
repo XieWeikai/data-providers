@@ -18,6 +18,8 @@ def main(argv=None):
         provider.add_arguments(command)
     inspect.add_argument("--report", type=Path, help="Write detailed JSON report to this explicit path")
     prepare.add_argument("destination", type=Path)
+    prepare.add_argument("--video-encoder", choices=("auto", "libx264", "h264_nvenc"), default="auto",
+                         help="Prepare H.264 encoder (default auto): safely probe NVENC once, else use x264 CRF18")
     check.add_argument("source", type=Path)
     provider.add_arguments(check, task_required=False)
     check.add_argument("--report", type=Path, help="Write machine-readable JSON diagnostics")
@@ -46,7 +48,7 @@ def main(argv=None):
                 parser.exit(1)
         elif args.command == "prepare":
             from .prepare import prepare as run_prepare
-            result = run_prepare(args.source, args.destination, config, workers=args.workers)
+            result = run_prepare(args.source, args.destination, config, workers=args.workers, video_encoder=args.video_encoder)
             print(json.dumps({"cache": str(args.destination), "episodes": len(result["episodes"]),
                               "frames": sum(e["length"] for e in result["episodes"]), "fps": config.fps,
                               "wrench_fps": config.wrench_fps}, ensure_ascii=False))

@@ -15,9 +15,8 @@ from .media import CAMERAS, RGBStatistics, crop, decode_quad
 from .reader import bag_files, discover, video_files
 from .source import FORMAT, TianjiSource, features
 from .execution import iter_parallel, worker_count
-
-H264_OPTIONS = {"preset": "veryfast", "crf": "18", "bf": "0"}
-
+from .encoding import (EncoderSpec, LIBX264, cache_encoder_matches, encoding_workers,
+                       select_encoder, validate_encoder_request)
 
 @dataclass(frozen=True)
 class VideoEpisode:
@@ -35,6 +34,7 @@ class VideoJob:
     height: int
     fps: int
     episodes: tuple
+    encoder: EncoderSpec = LIBX264
 
 
 def fingerprint(root):
@@ -46,7 +46,7 @@ def fingerprint(root):
     return result
 
 
-def prepare(root, destination, config, *, workers=None):
+def prepare(root, destination, config, *, workers=None, video_encoder="auto"):
     """Decode each raw quad stream once for all segments and all four cameras.
 
     The manifest is written last. An interrupted cache cannot be opened as a
@@ -54,6 +54,7 @@ def prepare(root, destination, config, *, workers=None):
     """
     root, destination = Path(root).resolve(), Path(destination).resolve()
     worker_count(workers, 0)  # Validate execution options even on a cache hit.
+    validate_encoder_request(video_encoder)
     if destination == root or destination.is_relative_to(root):
         raise ValueError("The cache must be outside the raw recording directory")
     options = asdict(config)
@@ -63,6 +64,8 @@ def prepare(root, destination, config, *, workers=None):
     if manifest_path.is_file():
         old = json.loads(manifest_path.read_text())
         if old.get("format") == FORMAT and old.get("alignment_config") == options and old.get("source_fingerprint") == origin:
+            if not cache_encoder_matches(old, video_encoder):
+                raise ValueError("Existing cache video encoder/quality recipe differs; choose a new destination")
             # Reopen verifies all referenced resources still exist.
             TianjiSource(destination, config).metadata
             return old
@@ -73,6 +76,10 @@ def prepare(root, destination, config, *, workers=None):
     source = TianjiSource(root, config, _collect_image_stats=False, _workers=workers)
     episodes = source.episodes
     alignment_seconds = time.perf_counter() - alignment_started
+    first_media = episodes[0].videos["observation.image.head_left"]
+    encoder, selection = select_encoder(video_encoder, first_media.width, first_media.height, config.fps)
+    print(f"Video encoder: {encoder.name}" +
+          (f" (auto fallback: {selection['fallback_reason']})" if "fallback_reason" in selection else ""), flush=True)
     destination.mkdir(parents=True)
     started = time.perf_counter()
     entries = []
@@ -99,13 +106,13 @@ def prepare(root, destination, config, *, workers=None):
         jobs.append(VideoJob(bag.name, first.paths, first.width, first.height, config.fps,
             tuple(VideoEpisode(ep.index, ep.length, source.audit(ep)["video_packet_index"],
                                {key: destination / value for key, value in entries[ep.index]["videos"].items()})
-                  for ep in group)))
+                  for ep in group), encoder))
     recordings = [None] * len(jobs)
-    video_workers = worker_count(workers, len(jobs))
+    video_workers = encoding_workers(workers, len(jobs), encoder)
     # Start expensive videos early to avoid a few long recordings keeping an
     # otherwise idle pool alive at the end. Output and manifest order stay put.
     schedule = sorted(range(len(jobs)), key=lambda i: sum(ep.length for ep in jobs[i].episodes), reverse=True)
-    with closing(iter_parallel(_encode_group, [jobs[i] for i in schedule], workers=workers)) as completed:
+    with closing(iter_parallel(_encode_group, [jobs[i] for i in schedule], workers=video_workers)) as completed:
         for scheduled_index, result in completed:
             job_index = schedule[scheduled_index]
             recording, image_stats = result
@@ -125,9 +132,7 @@ def prepare(root, destination, config, *, workers=None):
                             "video_decode_encode_statistics_seconds": video_seconds,
                             "video_workers": video_workers,
                             "recordings": recordings},
-                "video_encoding": {"codec": "h264", "encoder": "libx264", "pixel_format": "yuv420p",
-                                   "crf": 18, "preset": "veryfast", "b_frames": 0,
-                                   "intermediate_lossy_encoding": False},
+                "video_encoding": encoder.metadata(), "video_encoder_selection": selection,
                 "image_statistics": "RGB channel histograms before H.264 encoding, all selected pixels/frames"}
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
     return manifest
@@ -146,11 +151,12 @@ def _encode_group(job):
     def begin(ep):
         for camera in CAMERAS:
             output = av.open(str(ep.videos[f"observation.image.{camera}"]), "w")
-            stream = output.add_stream("libx264", rate=fps)
-            stream.width, stream.height, stream.pix_fmt = job.width, job.height, "yuv420p"
-            stream.options = H264_OPTIONS.copy()
+            stream = output.add_stream(job.encoder.name, rate=fps)
+            stream.width, stream.height, stream.pix_fmt = job.width, job.height, job.encoder.pixel_format
+            stream.options = dict(job.encoder.options)
             stream.codec_context.thread_count = 1
             stream.codec_context.gop_size = fps
+            stream.codec_context.max_b_frames = 0
             outputs[camera] = (output, stream)
             # Fail on ignored quality options instead of silently using defaults.
             output.start_encoding()
