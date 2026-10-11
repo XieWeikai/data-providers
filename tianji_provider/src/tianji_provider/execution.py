@@ -12,7 +12,7 @@ from queue import Empty, Queue
 
 
 def worker_count(requested, task_count):
-    """Resolve automatic concurrency, leaving two CPUs free and using at most 8.
+    """Resolve auto concurrency from available CPUs minus two, capped at twelve.
 
     An explicit positive integer overrides the automatic CPU limit, but cannot
     create more workers than tasks. Zero tasks need no worker. Booleans are not
@@ -29,7 +29,7 @@ def worker_count(requested, task_count):
             cpus = len(os.sched_getaffinity(0))
         except (AttributeError, OSError):
             cpus = os.cpu_count() or 1
-        requested = min(8, max(1, cpus - 2))
+        requested = min(12, max(1, cpus - 2))
     return min(requested, task_count)
 
 

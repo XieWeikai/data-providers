@@ -102,8 +102,12 @@ def prepare(root, destination, config, *, workers=None):
                   for ep in group)))
     recordings = [None] * len(jobs)
     video_workers = worker_count(workers, len(jobs))
-    with closing(iter_parallel(_encode_group, jobs, workers=workers)) as completed:
-        for job_index, result in completed:
+    # Start expensive videos early to avoid a few long recordings keeping an
+    # otherwise idle pool alive at the end. Output and manifest order stay put.
+    schedule = sorted(range(len(jobs)), key=lambda i: sum(ep.length for ep in jobs[i].episodes), reverse=True)
+    with closing(iter_parallel(_encode_group, [jobs[i] for i in schedule], workers=workers)) as completed:
+        for scheduled_index, result in completed:
+            job_index = schedule[scheduled_index]
             recording, image_stats = result
             recordings[job_index] = recording
             for ep_index, stats in image_stats.items():

@@ -25,7 +25,7 @@ def main(argv=None):
                        help="Decode every video frame to detect corruption and mapping errors (default: enabled)")
     for command in (check, prepare):
         command.add_argument("--workers", type=int, default=None,
-                             help="Recording workers (default: auto, at most 8); 1 runs serially; does not change data semantics")
+                             help="Recording workers (default: auto, at most 12); 1 runs serially; does not change data semantics")
     args = parser.parse_args(argv)
     try:
         config = provider.config_from_args(args, None)

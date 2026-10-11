@@ -78,3 +78,36 @@ def test_failed_video_batch_never_publishes_complete_manifest(tmp_path,monkeypat
     assert (output/'episode_000000/data.parquet').exists()
     with pytest.raises(FileExistsError,match='incomplete cache'):
         prep.prepare(raw,output,config,workers=1)
+
+
+def test_long_videos_start_first_but_manifest_and_stats_keep_source_order(tmp_path,monkeypatch):
+    prep=importlib.import_module('tianji_provider.prepare')
+    raw=tmp_path/'raw';raw.mkdir()
+    bags=[raw/f'my_bag-{i}' for i in range(3)]
+    media=SimpleNamespace(paths=(tmp_path/'video.mcap',),width=960,height=540)
+    episodes=[SimpleNamespace(index=i,length=n,stats={},data_path=bag,
+                              videos={'observation.image.head_left':media})
+              for i,(bag,n) in enumerate(zip(bags,[2,5,3]))]
+    class Source:
+        def __init__(self,*a,**kw):
+            self.episodes=episodes
+            self.reports=[]
+            self.metadata=SimpleNamespace(features={'observation.image.head_left':{'shape':[540,960,3]}})
+        def read_episode(self,ep):return pa.table({'timestamp':np.arange(ep.length,dtype=np.float32)/50})
+        def audit(self,ep):
+            return {key:np.arange(ep.length) for key in ('absolute_time_ns','video_packet_index','video_time_ns',
+                                                        'wrench_time_ns','wrench_sample_time_ns')}
+    monkeypatch.setattr(prep,'TianjiSource',Source)
+    monkeypatch.setattr(prep,'discover',lambda root:bags)
+    monkeypatch.setattr(prep,'fingerprint',lambda root:[])
+    def scheduled(fn,jobs,workers=None):
+        assert [job.bag for job in jobs]==[bags[i].name for i in [1,2,0]]
+        for index in [2,0,1]:
+            job=jobs[index];ep=job.episodes[0]
+            yield index,({'bag':job.bag,'frames':ep.length,'video_seconds':1.},
+                         {ep.index:{'observation.image.head_left':{'count':[ep.length]}}})
+    monkeypatch.setattr(prep,'iter_parallel',scheduled)
+    manifest=prep.prepare(raw,tmp_path/'cache',TianjiConfig(task='test'),workers=2)
+    assert [r['bag'] for r in manifest['timings']['recordings']]==[p.name for p in bags]
+    assert [e['index'] for e in manifest['episodes']]==[0,1,2]
+    assert [e['stats']['observation.image.head_left']['count'] for e in manifest['episodes']]==[[2],[5],[3]]

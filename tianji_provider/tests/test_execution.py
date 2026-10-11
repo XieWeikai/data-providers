@@ -65,10 +65,10 @@ def test_explicit_workers_and_empty_input():
     assert list(execution.iter_parallel(abs, (), workers=4)) == []
 
 
-def test_auto_uses_affinity_and_caps_at_eight(monkeypatch):
+def test_auto_uses_affinity_and_caps_at_twelve(monkeypatch):
     monkeypatch.setattr(execution.os, "sched_getaffinity", lambda _: set(range(14)), raising=False)
     monkeypatch.setattr(execution.os, "cpu_count", lambda: 128)
-    assert execution.worker_count(None, 100) == 8
+    assert execution.worker_count(None, 100) == 12
     assert execution.worker_count(None, 3) == 3
     monkeypatch.setattr(execution.os, "sched_getaffinity", lambda _: set(range(6)))
     assert execution.worker_count(None, 100) == 4
