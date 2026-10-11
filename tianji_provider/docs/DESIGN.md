@@ -58,6 +58,7 @@ tianji = "tianji_provider.provider:provider"
 |---|---|---|
 | [provider.py](../src/tianji_provider/provider.py) | 插件注册、配置与参数 | 保持发现/构造轻量，昂贵依赖在使用时加载 |
 | [reader.py](../src/tianji_provider/reader.py) | 文件发现、MCAP/schema/CDR 解析、单位和时钟校验 | 集中原始格式契约，避免 CLI 与转换各写一套解析 |
+| [decoder.py](../src/tianji_provider/decoder.py) | 每个 schema 预编译消息类及字段读取计划 | 消除逐消息的重复类型构造，仍完整解码所有字段 |
 | [alignment.py](../src/tianji_provider/alignment.py) | 网格、有效性、重采样、命令补齐、首尾裁剪 | 使用数组算法，供 source 和 diagnostics 共用 |
 | [media.py](../src/tianji_provider/media.py) | H.264 顺序解码、四宫格裁分、PPM 帧、图像统计 | 将大体积图像保持为有界流式处理 |
 | [source.py](../src/tianji_provider/source.py) | 原始/缓存双路径、Arrow 表、Episode、DatasetMetadata、审计 | 对上游暴露统一只读 DatasetSource |
@@ -73,6 +74,8 @@ tianji = "tianji_provider.provider:provider"
 ## 读取契约
 
 数值 MCAP 使用嵌入的 ROS 2 schema 解码。关节名称重排、7 维命令、5 项夹爪电机反馈、目标归一化范围、EEF/wrench 坐标系逐消息核对。用于输出的数值必须有限。
+
+`CompiledDecoderFactory` 按单个 MCAP 文件的 schema 缓存消息类和字段读取计划，不再对每个嵌套值重复构造 Python type 或格式化 schema 文本。仍复用 mcap-ros2-support 的 schema parser 与 CdrReader，完整解码辅助 topic、Header 和所有字段；没有通过跳过数据来加速，也不修改第三方全局函数。由于使用该依赖的私有解析接口，目前限制版本为 `>=0.5.7,<0.6`；升级依赖必须重新运行与 stock DecoderFactory 的差分测试。缓存按文件隔离，不能跨 bag 仅用 schema.id 共享。
 
 有 Header 用 `header.stamp`，无 Header 用 MCAP log_time；Header 非法或与记录时间相差超过 1 秒就失败。同 topic 时间倒退不通过排序掩盖；相同时间戳保留最后一条更新。已录制的辅助 topic 也参与时间范围与时钟检查。
 

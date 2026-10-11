@@ -8,10 +8,10 @@ import struct
 import numpy as np
 import yaml
 from mcap.reader import make_reader
-from mcap_ros2.decoder import DecoderFactory
 
 # Only action-producing command streams may be empty; observations stay strict.
 from .alignment import COMMAND_STATE
+from .decoder import CompiledDecoderFactory
 
 VIDEO_TOPIC = "/recorder/quad_tile/compressed_undistorted"
 JOINT_NAMES = tuple(f"Joint{i}_{side}" for side in ("L", "R") for i in range(1, 8))
@@ -65,7 +65,7 @@ def messages(paths, topics=None):
     """One reader and schema decoder per physical file, reused for all messages."""
     for path in paths:
         with path.open("rb") as handle:
-            reader = make_reader(handle, decoder_factories=[DecoderFactory()])
+            reader = make_reader(handle, decoder_factories=[CompiledDecoderFactory()])
             yield from reader.iter_decoded_messages(topics=topics, log_time_order=False)
 
 

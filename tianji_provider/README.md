@@ -10,6 +10,7 @@
 | [内部设计](docs/DESIGN.md) | SourceProvider / DatasetSource 接口、模块分工、时间算法、数据与媒体生命周期 |
 | [检查与报错](docs/CHECKS.md) | 检查项目、错误代码、严重级别、CLI 退出码及对后续转换的影响 |
 | [验证记录](VALIDATION.md) | 按版本记录的测试范围、实录结果和性能；历史结果不代表当前规则 |
+| [性能优化实验](docs/PERFORMANCE.md) | 每项方案的 A/B 耗时、保真验证及 ≥5% 接受门槛 |
 
 ## 功能与边界
 
