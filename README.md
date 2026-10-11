@@ -8,17 +8,17 @@
 |---|---|---|---|
 | `tianji_provider/` | `tianji` | Tianji / Marvin Pro Thor 的 ROS 2 MCAP 轨迹与四宫格 H.264 视频 | [使用说明](tianji_provider/README.md) · [验证记录](tianji_provider/VALIDATION.md) |
 
-Tianji 文档入口：[全部参数详解](tianji_provider/docs/PARAMETERS.md) · [高频 wrench 窗口](tianji_provider/docs/WRENCH_WINDOWS.md) · [插件接口与内部设计](tianji_provider/docs/DESIGN.md) · [检查项目与报错](tianji_provider/docs/CHECKS.md) · [性能实验](tianji_provider/docs/PERFORMANCE.md)。当前使用手册对应 0.6.1；VALIDATION 保留各版本的历史测量。
+Tianji 文档入口：[全部参数详解](tianji_provider/docs/PARAMETERS.md) · [高频 wrench 窗口](tianji_provider/docs/WRENCH_WINDOWS.md) · [插件接口与内部设计](tianji_provider/docs/DESIGN.md) · [检查项目与报错](tianji_provider/docs/CHECKS.md) · [第二阶段性能实验](tianji_provider/docs/PERFORMANCE_ROUND2.md)。当前使用手册对应 0.6.2；VALIDATION 保留各版本的历史测量。
 
 `SourceProvider` 负责参数和创建数据源，`DatasetSource` 提供元数据、episode 表格及媒体给 LeTools。Tianji 包另外提供 check、inspect、prepare 辅助工具；这些不是每个 provider 必须实现的标准命令，也不编辑原始 MCAP。LeRobot 目标布局由 LeTools 后端负责，8095 网页的任务编排在独立 data-web-platform 项目中。
 
-Tianji provider 支持目标 FPS（默认 50）、必填任务文本、观测与视频的时间交集，以及四路相机拆分。0.5.0 起四路控制命令取有效覆盖并集，每个保留时刻至少一路有效，其余以同帧 state 补 action，支持某一路整段无命令的单臂操作。每条录制保持为一个 episode，默认裁剪首尾静止部分并保留中途暂停。输出由 LeTools 的 LeRobot v2.1 / v3.0 后端负责；旧 v1/v2/v3 准备缓存需重建，0.6.0 生成的同配置 v4 缓存可继续在 0.6.1 使用。
+Tianji provider 支持目标 FPS（默认 50）、必填任务文本、观测与视频的时间交集，以及四路相机拆分。0.5.0 起四路控制命令取有效覆盖并集，每个保留时刻至少一路有效，其余以同帧 state 补 action，支持某一路整段无命令的单臂操作。每条录制保持为一个 episode，默认裁剪首尾静止部分并保留中途暂停。输出由 LeTools 的 LeRobot v2.1 / v3.0 后端负责；旧 v1/v2/v3 准备缓存需重建，0.6.0/0.6.1 生成的同配置合法 v4 缓存可继续在 0.6.2 使用。
 
 提供 `tianji-provider check /path/to/recordings --report /path/to/tmp/diagnostics.json` 独立异常检测：默认完整解码视频，检查反馈/视频缺口及数据结构、时钟、标定等问题，逐轨迹继续扫描。检测命令不要求 task，不修改或删除输入。
 
 0.6.0 起夹爪 action 使用 `/control/gripperValueL/R`。Wrench 不滤波，只保存 `observation.wrench_windows`，形状 `[wrench_fps/fps,12]`。默认主频 50 Hz、`--wrench-fps 200`，每行 4 个过去原始力样本；wrench-fps 必须 ≥ fps 且为其整数倍。当前缓存格式为 `tianji-thor-v4`。
 
-直接转换使用无损 RGB 中间帧，避免 JPEG 导致的细节损失。正式数据推荐显式串联 check、prepare、convert：prepare 在编码阶段对原始四宫格完整解码一次，输出四路 H.264 CRF 18 视频并计算图像统计，再由 LeTools 封装。前置 deep check 是额外一次完整视频解码。完整命令、缓存兼容性和画质/速度验证见 provider 文档。
+直接转换使用无损 RGB 中间帧，避免 JPEG 导致的细节损失。0.6.2 新增 `check_and_prepare()` 融合API供8095转换使用，复用完整检查和准备过程中的读取；独立check/prepare命令仍可串联。默认安全探测NVENC H.264 CQ16/Main，不可用则用软件x264 CRF18；可用 `prepare --video-encoder libx264` 固定软件编码。解码仍为原软件H.264，未采用会放松坏码流拒绝的CUVID候选。最终LeTools复用编码包，不二次有损压缩。Thor全125检查、114通过项转换由9分32秒降至4分29.5秒，代价是视频约3.88倍体积、峰值内存约8.13GB。完整流程、适用范围和质量证据见provider文档。
 
 ## 安装一个 provider
 

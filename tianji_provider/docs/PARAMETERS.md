@@ -1,11 +1,11 @@
-# 参数详解（0.6.1）
+# 参数详解（0.6.2）
 
 [返回使用手册](../README.md) · [内部设计](DESIGN.md) · [检查与报错](CHECKS.md)
 
 本页以 [provider.py](../src/tianji_provider/provider.py) 的 `TianjiConfig` / `add_arguments()` 和 [cli.py](../src/tianji_provider/cli.py) 为准。先区分三组参数：
 
 1. **Provider 语义参数**：决定 task、时间网格、对齐、补齐和裁剪，四种入口共用。
-2. **辅助命令参数**：如 check 的深度检查开关、报告路径，不是转换配置。
+2. **辅助工具执行参数**：如 check 的深度检查、并发、报告路径，以及 prepare 的编码器选择；不属于信号配置。部分融合选项仅供 Python API 使用。
 3. **LeTools 后端参数**：目标版本、并发、编码等；由 LeTools 解析，不能传给 `tianji-provider prepare`。
 
 ## 命令与位置参数
@@ -128,20 +128,89 @@ CLI 不接受 `29.97` 这类非整数。时间交集或裁剪后的区间至少�
 | 参数 | 适用命令 | 默认 | 意义和边界 |
 |---|---|---|---|
 | `--workers N` | check、prepare | 自动：最多 12，且可用 CPU 数减 2，最低 1 | 正整数，实际不超过录制数；1 为串行。check 并行完整轨迹检查，prepare 数值加载和视频分别按轨迹并行，视频长任务优先。执行参数不影响字段、质量或缓存身份 |
+| `--video-encoder MODE` | **仅 prepare** | `auto` | `auto` / `libx264` / `h264_nvenc`；选择下面的已验证 H.264 配方。不是 LeTools 的 `--video-codec`，不改变信号参数，但影响编码缓存能否复用 |
 | `--report PATH` | check、inspect | 不写文件 | 将完整 JSON 写入该文件，必要时创建父目录；同名文件会被重写，建议使用独立报告路径，不能指向原始数据文件 |
 | `--deep-video` | check | 开启 | 完整解码视频，验证所有帧映射、数量、顺序与尺寸；不编码输出 |
 | `--no-deep-video` | check | 不启用此快速模式 | 仍读取全部视频消息时间戳/结构，但只解码首帧检查尺寸，不能排除后续坏帧 |
 | `-h` / `--help` | 所有命令/子命令 | 无 | 显示相应帮助后退出，不扫描数据 |
 
-`--workers`、`--report`、深度检查开关不属于 `TianjiConfig`，不改变对齐缓存。Prepare 没有 `--report` 或 `--no-deep-video`；其清单和审计路径由缓存结构固定。Inspect 没有 deep-video 开关；其快速范围由实现决定。
+`--workers`、`--video-encoder`、`--report`、深度检查开关不属于 `TianjiConfig`。workers 不改变缓存语义，编码器另按 manifest 配方匹配。Prepare 没有 `--report` 或 `--no-deep-video`；其清单和审计路径由缓存结构固定。Inspect 没有 workers、video-encoder 或 deep-video CLI 开关，但首次加载原始 source 仍会使用其内部自动并发。
+
+### --workers：进程数量与实际资源
+
+省略时使用 `min(12,max(1,可用CPU数-2),录制数)`；优先读取 CPU affinity，否则用系统 CPU 数。显式正整数可覆盖自动 CPU 限额，实际仍不超过任务数；API 拒绝 bool、0 和负数。NVENC 的视频/融合阶段另限制为最多 12 个录制 worker，即最多 48 个相机会话，显式更大值也不能绕过。普通 prepare 的数值阶段与视频阶段顺序执行；融合 API 将同一录制的读取、检查、编码放在一个任务内。
+
+`workers=1` 不创建任务池，但 auto/NVENC 仍可能启动一次独立探测进程；要完全避免 GPU 探测需选 libx264。更高并发会增加内存、CPU 和硬件会话占用，公式不是 CPU 绑定或保证留出两核。融合 24 条批次实测进程树采样峰值 RSS 约 7.77 GB，不是内存上限；资源不足可降低 workers。执行顺序可按长任务优先调整，输出索引、统计归属、尺寸基准与报告顺序不变。
+
+### --video-encoder：编码配方、回退与缓存
+
+| 取值 | 新缓存的行为 | 配方与失败规则 |
+|---|---|---|
+| `auto` | 独立子进程实际探测一次 NVENC；成功则选硬件，否则回退软件 | 仅探测失败/超时/崩溃可回退；实际批量编码故障直接失败 |
+| `libx264` | 使用 CPU 软件编码，不探测 NVENC | H.264、CRF18、veryfast、yuv420p、无 B 帧、GOP=fps |
+| `h264_nvenc` | 必须通过当前配方的实际探测 | H.264、VBR CQ16、p4、HQ、Main、yuv420p、无 B 帧、GOP=fps；不可用时抛出，不回退 |
+
+探测使用当前 PyAV/驱动，实际编码、flush、解码六个合成帧并检查时间和格式；内部默认超时 20 秒，不是公开 CLI 参数。它不能证明任意显卡都能承受 48 会话。一次准备的所有录制使用同一选定配方，不在运行中混用编码器。
+
+CQ 与 CRF 是不同编码器的不同质量控制，不能用数字大小推断等价画质。NVENC CQ16 经过真实样本逐帧质量对照，24 条批次的视频字节数约为软件 CRF18 的 3.896 倍；需要较小文件可选择 libx264。当前不开放任意 CQ、CRF、preset、profile CLI，不能通过降低质量参数套用已公布的性能/质量结论。
+
+普通 prepare 命中已有 v4 缓存时不探测 GPU，但会匹配编码配方：auto 接受已验证的旧/当前 x264 CRF18 或当前 NVENC CQ16/Main；显式取值必须匹配该编码器配方。旧 x264 清单没有 options 字段仍可按既有质量字段识别，其他 CQ/profile 不能借 auto 复用。不同配方需新目录重建，不覆盖、不自动转码已有视频。直接打开缓存的 TianjiSource 不执行此准备阶段白名单。
 
 ## 仅 Python API 存在的配置
 
 `TianjiConfig.preset` 默认且只允许 `thor-v1`，定义已验证的 topic/坐标系/字段契约。**当前 CLI 没有 `--preset` 参数**，也没有任意 topic 名称映射开关。不能通过换一个字符串适配另一种机器人。
 
-`TianjiSource(..., _collect_image_stats=False)` 是内部控制选项，供 inspect 和 prepare 延后/省略图像统计使用；不是公共 CLI 调参入口。`prepare(..., workers=None)` 与 `check_dataset(..., workers=None)` 可控制录制并发；check 的 `deep_video` 控制解码范围，`progress` 在父进程按稳定顺序回调。原始 `TianjiSource` 的首次 metadata/episodes 访问也默认并行，内部 `_workers=1` 可用于串行对照或受限交互环境；provider.open 返回 source 仍然不立即读取或启动进程。缓存 source 不启动原始读取池。
+`TianjiSource(..., _collect_image_stats=False)` 是内部控制选项，供 inspect 和 prepare 延后/省略图像统计使用；默认 True 会在原始 source 加载时计算图像统计。不要为了提速随意关掉直接转换需要的统计。原始 source 首次访问 metadata/episodes 也默认并行，内部 `_workers=1` 可用于串行对照或受限交互环境；provider.open 构造 source 时不立即读取或启动进程。缓存 source 不启动原始读取池。这两个内部选项没有同名 provider CLI，均不进入 TianjiConfig。
 
-多进程采用 spawn，直接 Python 调用 check/prepare 或首次加载原始 DataSource 的脚本都必须放在 `if __name__ == '__main__':` 保护下；交互环境可显式 workers=1 或 `TianjiSource(..., _workers=1)`。这些都不是输出信号参数，也不改变缓存身份。
+## Python API 执行参数
+
+```text
+check_recording(bag, config, *, deep_video=True)
+check_dataset(root, config, *, deep_video=True, progress=None, workers=None)
+prepare(root, destination, config, *, workers=None, video_encoder="auto")
+check_and_prepare(root, destination, config, *, workers=None, progress=None,
+                  video_encoder="auto", prepare_valid_only=False)
+```
+
+前两个函数来自 `tianji_provider.diagnostics`，prepare 来自 `tianji_provider.prepare`，融合入口来自 `tianji_provider.fused`。它们是辅助工具 API，不是 LeTools 对每个 provider 强制要求的接口。独立 check_dataset 和 prepare 即使先后在同一 Python 进程调用，也不会共享数值或视频结果；只有融合入口在单次调用内复用。
+
+| 参数 | 适用 API / 默认 | 详细含义 |
+|---|---|---|
+| `bag` | check_recording，必填 | 单条录制目录；检查这一条，返回逐条报告，不创建任务池 |
+| `root` | 其他三个 API，必填 | 原始录制或父目录；check_dataset/融合入口识别并汇报不完整录制，普通 prepare 采用普通 source 的发现规则 |
+| `destination` | prepare/融合入口，必填 | 缓存目录，不是最终 LeRobot 目录。普通 prepare 可以复用匹配的完整缓存；融合入口始终要求全新目录，并拒绝写进选中录制的真实路径内 |
+| `config` | 全部，必填 | 已验证的 TianjiConfig，包含 task、采样率、阈值和裁剪设置；Python 创建配置仍须提供 task，CLI check 的 validation 占位值由 CLI 注入 |
+| `workers` | check_dataset/prepare/融合，默认 None | 按上述公式自动选择；正整数显式指定。check_recording 不接受此参数；progress 不会放进 worker 执行 |
+| `deep_video` | check_recording/check_dataset，默认 True | True 完整解码视频；False 仍读完整视频时间戳和结构，但只解码首帧。融合入口不提供此开关，始终完整检查 |
+| `progress` | check_dataset/融合，默认 None | 可传 `callback(completed,total,result)`。父进程按输入顺序调用，计数从 1 开始；result 是该录制最终诊断。融合回调发出前该录制的完整视频检查已经结束。回调异常会终止调用并关闭任务池 |
+| `video_encoder` | prepare/融合，默认 auto | 与 prepare CLI 的三选一含义相同；父进程只选择一次，融合可额外读取首个可用帧确定探测尺寸。输出质量设置记录在 manifest，不属于信号配置 |
+| `prepare_valid_only` | **仅融合 API**，默认 False | 必须为真正的 bool，不接受 0/1/字符串。False 要求所有选中项通过，任何 error 则 manifest=None；True 只选择有效项输出，但完整报告继续保留所有失败项和 valid=False。没有有效项时仍无 manifest，不放宽任何数据检查 |
+
+`check_recording/check_dataset` 返回诊断字典，普通 prepare 返回完成清单。融合返回 `{ "report": ..., "manifest": ...或None, "selection": ... }`；manifest 不存在时缓存不可用，函数不会代你保存 report JSON。selection 记录模式、检查/通过/拒绝数量、拒绝项目；成功清单的 `source_selection` 还记录每个原输入索引到连续 episode 索引的映射。源文件变化、编码器/写盘/进程故障会抛出异常，不一定能返回完整报告。
+
+融合 API 在检查通过前可能已写部分视频，默认严格模式发现任何错误便不写成功清单，不删除这些诊断文件；新的调用仍须换新目录。有效子集模式也不重命名覆盖失败项目录，文件夹编号可能不连续，但表格的 episode/global index 连续。`report.seconds` 包含合并的准备工作，不能当作纯检查时间。融合 API 只写缓存，不负责 LeRobot convert、目标验证或最终发布。当前没有 `--prepare-valid-only`、`--fused` 或 `check-and-prepare` provider CLI。
+
+多进程采用 spawn，直接 Python 调用并发 API 或首次加载原始 DataSource 的脚本都应放在 main guard 下。交互环境可用 workers=1；融合/prepare 若还需避免独立 GPU 探测，额外指定 libx264：
+
+```python
+from tianji_provider.fused import check_and_prepare
+from tianji_provider.provider import TianjiConfig
+
+
+def main():
+    result = check_and_prepare(
+        "/path/to/recordings", "/path/to/new-cache",
+        TianjiConfig(task="Pick and place"),
+        workers=None, video_encoder="auto", prepare_valid_only=False,
+    )
+    if result["manifest"] is None:
+        raise SystemExit(f"有 {result['report']['invalid_recordings']} 条异常，未生成成功缓存")
+    print(len(result["manifest"]["episodes"]))
+
+
+if __name__ == "__main__":
+    main()
+```
 
 ## 常见 LeTools 参数：不属于 Tianji provider
 
@@ -152,8 +221,8 @@ CLI 不接受 `29.97` 这类非整数。时间交集或裁剪后的区间至少�
 | `--source-format tianji` | 选择插件，默认 auto 不能代替显式原始源选择 | 让 LeTools 注入 Tianji 参数并构造 TianjiSource；辅助 CLI 不需要此选项 |
 | `--to v2.1` / `--to v3.0` | 必填，选择目标布局；CLI 也接受 `2.1` / `3.0` | 不改变对齐算法；同一缓存可分别输出两个版本 |
 | `--workers N` | LeTools 数据写入并发 | 不控制 provider check/prepare 或原始 DataSource 的内部自动并发；平台默认 2 |
-| `--video-workers N` | LeTools 媒体任务并发 | 不改变 prepare 固定编码设置或单条循环；平台默认 4 |
-| `--video-codec libx264` | 对 FrameSequence 编码为 H.264 | 直接路径适用；prepare 自己已固定 libx264，缓存不是 MP4 转码输入 |
+| `--video-workers N` | LeTools 媒体任务并发 | 不控制 provider prepare/融合的编码配方或进程数；平台默认 4 |
+| `--video-codec libx264` | 对 FrameSequence 编码为 H.264 | LeTools 直接路径适用；provider 准备使用自己的 video_encoder，缓存不是要求重编码的 MP4 输入 |
 | `--video-pixel-format yuv420p` | 指定帧编码像素格式 | 与上一项配合，直接路径适用；不能通过标签修改缓存码流 |
 | `--video-batch-frames N` | 每批读取的图像帧数，正整数，已验证默认 48 | 直接路径影响 PPM 缓冲和吞吐，不改变时间映射 |
 | `--video-codec-threads N` | 每个帧编码器的线程数，正整数，已验证默认 1 | 与 video-workers 是不同层次，并发相乘可能争用 CPU；不控制 prepare |
@@ -161,7 +230,7 @@ CLI 不接受 `29.97` 这类非整数。时间交集或裁剪后的区间至少�
 | `--overwrite` | LeTools 显式允许替换已有目标 | 本文例子不使用；8095 禁止覆盖；provider prepare 没有此开关 |
 | `--no-validate` | 跳过 LeTools 自己的转换后验证 | 不跳过 provider 的读取/对齐检查；8095 没有开放这个绕过开关 |
 
-LeTools workers 未显式指定时由其当前版本默认值决定，与网页固定表单默认值不同。已编码的 prepare 缓存应省略图像编码参数，保持复用路径；不能期待给它指定 codec 参数就重新编码 MP4。固定 CRF 18/veryfast/bf=0 是 prepare 的实现策略，当前 provider 没有 `--crf`、`--quality` 或编码器 preset CLI。
+LeTools workers 未显式指定时由其当前版本默认值决定，与网页固定表单默认值不同。已编码的 prepare 缓存应省略图像编码参数，保持复用路径；不能期待给它指定 codec 参数就重新编码 MP4。软件 CRF18/veryfast 与 NVENC CQ16/p4/Main 都是 provider 的固定已验证配方，当前没有任意 `--crf`、`--quality`、`--cq` 或编码器 preset CLI。
 
 ## 缓存与参数联动
 
@@ -172,9 +241,11 @@ LeTools workers 未显式指定时由其当前版本默认值决定，与网页�
 | 改 lowpass/linear、开启/关闭裁剪 | 不可以 |
 | 关闭裁剪后只改运动阈值 | 仍不可以，配置按完整字段匹配 |
 | 改 check/prepare workers | 可以，不改变数据语义和缓存配置 |
+| 改 prepare 的 video_encoder 请求 | 只有已有清单满足新请求的配方白名单时可以；不匹配需新目录，不能覆盖转码 |
 | 改 report 路径或 check 深度 | 不影响缓存配置，但诊断覆盖范围不同 |
 | 改目标 v2.1/v3.0、LeTools workers | 可以，不改变 provider 时间语义 |
-| 旧 tianji-thor-v1/v2/v3 缓存换成 0.6.1 打开 | 不可以，必须重建为 tianji-thor-v4 |
-| 0.6.0 的 tianji-thor-v4 缓存换成 0.6.1 打开 | 同配置及资源有效时可以，性能优化未改变内容语义 |
+| 旧 tianji-thor-v1/v2/v3 缓存换成 0.6.2 打开 | 不可以，必须重建为 tianji-thor-v4 |
+| 0.6.0/0.6.1 的 tianji-thor-v4 软件缓存换成 0.6.2 | 同配置及资源有效时可由 source 打开；普通 prepare 复用还须满足所请求编码配方 |
+| 再次调用融合 API 或改变 prepare_valid_only | 融合调用始终要求新目录；不把旧缓存当作一次新的检查结果 |
 
-参数改变不自动修复或删除数据。任何新策略都应先重新 check，再以相同配置 prepare/convert；不要仅根据旧报告决定新参数的转换是否可靠。
+参数改变不自动修复或删除数据。新配置必须重新检查，可以使用独立 check→prepare 路线，也可以用融合 API 在一次调用内完成两者；不要仅根据旧报告决定新参数的转换是否可靠。

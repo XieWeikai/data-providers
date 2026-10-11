@@ -1,6 +1,6 @@
 # Tianji provider for LeTools
 
-本文描述 **tianji-provider 0.6.1**：读取 Thor / Tianji / Marvin Pro 的 ROS 2 MCAP 录制，将机器人信号和四路画面对齐，向 LeTools 提供 `DatasetSource`，由 LeTools 输出 LeRobot v2.1 / v3.0。Provider 不连接或控制机器人，读取源数据不需要 ROS 运行环境。0.6.1 为性能优化版本，保持 0.6.0 的数值、检查、统计和编码语义，缓存格式仍为 tianji-thor-v4。
+本文描述 **tianji-provider 0.6.2**：读取 Thor / Tianji / Marvin Pro 的 ROS 2 MCAP 录制，将机器人信号和四路画面对齐，向 LeTools 提供 `DatasetSource`，由 LeTools 输出 LeRobot v2.1 / v3.0。Provider 不连接或控制机器人，读取源数据不需要 ROS 运行环境。0.6.2 增加长任务优先调度、可探测的 NVENC 编码，以及显式融合检查与准备的 API；保持既有字段、采样、补命令、裁剪、检查阈值和精确统计。视频编码器可以改变，缓存格式仍为 `tianji-thor-v4`。
 
 | 文档 | 内容 |
 |---|---|
@@ -28,6 +28,7 @@
 | `check` | 逐条检查数值、时钟、标定、对齐与完整视频，汇总异常 | 可选 JSON 报告 |
 | `inspect` | 查看对齐、补齐、裁剪结果、输出帧数和追溯摘要 | 可选 JSON 报告 |
 | `prepare` | 写可复用的 Parquet、逐帧审计、四路 H.264 及统计 | 独立缓存目录 |
+| `check_and_prepare()` | 一次调用共享数值读取、对齐和完整视频帧流，执行全部检查并准备缓存；只提供 Python API / 配套 Web 入口 | 返回报告、选择记录及成功清单；写独立缓存目录 |
 | 直接转换 | 向 LeTools 提供无损 RGB PPM 帧序列，由 LeTools 编码 | 最终目录由 LeTools 写入 |
 | 缓存转换 | 缓存作为 DatasetSource，复用编码视频写出 v2.1/v3.0 | 最终目录由 LeTools 写入 |
 | 审计与性能描述 | 时间映射、补齐范围、大小/locality 描述、planner identity | 报告、缓存和元数据 |
@@ -41,7 +42,7 @@
 - Wrench 始终在独立高频网格取过去最近的真实测量，不滤波、不平均、不插值。每行包含 `N=wrench_fps/fps` 个从旧到新的采样，末点对齐该行时间戳；不再输出 `observation.wrench` 或 `observation.wrench_history`。
 - 真实观测缺口仍严格检查，默认最大间隔/视频帧年龄 100 ms。四路命令同时失效的保留时刻也会失败，不跨越缺口拼接。
 - 一条成功处理的录制对应一个 episode。只裁首尾，不拆轨迹，不删中间网格点，不修改输入。
-- Prepare 固定 H.264 / libx264、CRF 18、veryfast、yuv420p、无 B 帧，保留原始单路尺寸。LeTools 随后复用编码视频，不再有损编码。
+- Prepare 和融合 API 默认 `video_encoder="auto"`：独立探测 NVENC，成功后使用 H.264 NVENC / VBR CQ16 / p4 / HQ / Main；不可用时使用原 libx264 / CRF18 / veryfast。两者均为 yuv420p、无 B 帧、GOP=fps，保留原始单路尺寸和帧序列。LeTools 随后复用编码视频，不再有损编码。CQ 与 CRF 不是同一尺度。
 - 当前缓存格式 **`tianji-thor-v4`** 与目标 **LeRobot v3.0** 无关。旧 `tianji-thor-v1/v2/v3` 缓存必须从原始录制重新 prepare；旧视频即使已是 H.264，也不能复用旧时间轴缓存。已有最终 LeRobot 数据集不会被改写或删除。
 
 ## 安装与注册
@@ -67,7 +68,9 @@ uv pip install --python "$TIANJI_ENV/bin/python" \
   'import tianji_provider; print(tianji_provider.__version__, tianji_provider.__file__)'
 ```
 
-新环境应先按 data-web-platform 部署说明安装完整 LeTools/native 依赖；不要为更新 provider 重建使用中的 `.venv`。**从 0.6.0 升级时新增了 opencv-python-headless，并要求 mcap-ros2-support>=0.5.7,<0.6；首次升级不要直接使用 --no-deps 跳过依赖。** 全部依赖已满足且只需重装当前包时才可加 `--no-deps`。确认发现的 `tianji` 版本为 0.6.1、模块路径为预期仓库；不要复制其他全局环境的 provider 配置进来。
+新环境应先按 data-web-platform 部署说明安装完整 LeTools/native 依赖；不要为更新 provider 重建使用中的 `.venv`。**从 0.6.0 升级时新增了 opencv-python-headless，并要求 mcap-ros2-support>=0.5.7,<0.6；首次升级不要直接使用 --no-deps 跳过依赖。** 全部依赖已满足且只需重装当前包时才可加 `--no-deps`。确认发现的 `tianji` 版本为 0.6.2、模块路径为预期仓库；不要复制其他全局环境的 provider 配置进来。
+
+NVENC 还依赖机器的 NVIDIA 驱动、硬件和当前 PyAV/FFmpeg 的编码器支持；仅在编码器名称列表中出现不代表能用。`auto` 通过独立进程实际编码、flush、解码和检查时间戳，只在探测失败时回退软件编码。没有 NVIDIA 硬件也可使用本包，不要求为 provider 重装系统驱动。
 
 Web 服务在启动时发现 providers。更新后确认无运行/排队任务，再重启并读取实际环境：
 
@@ -138,7 +141,7 @@ recordings/
 
 ## 推荐流程：check → prepare → convert → validate
 
-以下为 **Bash** 示例。先激活正确环境，替换路径；缓存和输出使用新目录，输入为单条录制或待转换录制的父目录。
+以下为兼容的**独立 CLI 路线**，使用 Bash。先激活正确环境，替换路径；缓存和输出使用新目录，输入为单条录制或待转换录制的父目录。两个独立命令仍会重复读取数值和解码视频；需要共享这些处理时使用下面的融合 API 或配套 Web。当前没有融合子命令。
 
 ```bash
 source "$HOME/projects/letools-tianji/.venv/bin/activate"
@@ -155,7 +158,8 @@ TIANJI_ARGS=(--task "$TIANJI_TASK" --fps 50 --wrench-fps 200
 
 tianji-provider check "$TIANJI_RAW" "${TIANJI_ARGS[@]}" \
   --deep-video --report "$TIANJI_REPORT" &&
-tianji-provider prepare "$TIANJI_RAW" "$TIANJI_CACHE" "${TIANJI_ARGS[@]}" &&
+tianji-provider prepare "$TIANJI_RAW" "$TIANJI_CACHE" "${TIANJI_ARGS[@]}" \
+  --video-encoder auto &&
 letools convert "$TIANJI_CACHE" "$TIANJI_OUTPUT" \
   --source-format tianji "${TIANJI_ARGS[@]}" --to v2.1 \
   --workers 2 --video-workers 4 &&
@@ -165,6 +169,45 @@ letools validate "$TIANJI_OUTPUT" --deep
 `&&` 确保前一步非零退出就停止后续命令。**Check 报告不会被下一次独立 convert 自动读取。** Prepare/直接转换自身仍有读取和对齐校验，但不自动执行完整逐条诊断报告流程。各阶段应使用相同的 provider 参数。
 
 同一缓存可以另行写出 v3.0：换新输出目录，将 `--to` 改为 `v3.0`，保持 provider 配置一致。上述 CLI 的最后一次 deep validation 发生在目标已写出之后；若失败，不会撤销已写目录。8095 则在额外暂存目录完成 deep validation 后才发布最终目录。
+
+### 融合检查与准备：Python API
+
+保存为 Python 脚本运行；多进程使用 spawn，调用必须放在 main guard 下：
+
+```python
+import json
+from pathlib import Path
+
+from tianji_provider.fused import check_and_prepare
+from tianji_provider.provider import TianjiConfig
+
+
+def main():
+    result = check_and_prepare(
+        "/path/to/selected-recordings",
+        "/path/to/new-cache-50",
+        TianjiConfig(task="Pick and place", fps=50, wrench_fps=200),
+        workers=None,
+        video_encoder="auto",
+        prepare_valid_only=False,
+    )
+    report_path = Path("/path/to/reports/check.json")
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(result["report"], ensure_ascii=False, indent=2))
+    if result["manifest"] is None:
+        raise SystemExit("所选轨迹检查未全部通过，未生成可用缓存")
+    print("缓存已完成，可接上面的 LeTools 缓存转换命令")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+默认 `prepare_valid_only=False` 要求所选录制全部通过。融合过程可能已在新缓存目录生成部分视频，但任一轨迹检查失败就返回完整报告、`manifest=None`，不写 `tianji-cache.json`，不生成或发布最终 LeRobot 数据集。编码器、磁盘或进程故障直接抛出异常；失败目录拒绝覆盖，可保留诊断并换新目录重试。
+
+只有调用者明确要输出有效子集时，才传 `prepare_valid_only=True`。全部输入仍执行相同 deep check；存在失败时 `report["valid"]` 仍为 False，错误不会变成 warning。成功清单只引用通过项，episode/global index 连续重编，`selection` 和清单的 `source_selection` 保存拒绝清单与原输入到输出的映射；全部失败时依然没有 manifest。原始数据不删、不修、不拆，缓存中的录制文件夹编号可能有空档，应按清单读取。此选项暂未提供 CLI，配套 Web 始终使用默认严格模式。
+
+融合入口要求全新缓存目录，不自动复用已有缓存。它没有全局隐式状态；单独运行一次 check 后再调用它，也不会自动继承旧结果。每条数值读取和对齐一次，完整视频解码一次；视频时间戳另行扫描，自动编码器探测可能额外读取首帧。每帧检查在输出选择前执行，被裁剪尾部仍检查。详细参数与结果字段见[参数详解](docs/PARAMETERS.md#python-api-执行参数)。
 
 ### 单独检查或查看对齐
 
@@ -188,7 +231,13 @@ letools convert /path/to/recordings /path/to/new-lerobot-v21 \
   --video-codec libx264 --video-pixel-format yuv420p
 ```
 
-直接路径使用无损 RGB PPM `FrameSequence`，由 LeTools 编码；四路相机各自顺序解码原视频，另有图像统计解码，适合少量数据或调试。示例的 libx264 在已验证后端默认使用 CRF 23，不等同于 prepare 的 CRF 18。PPM 是无损中间帧，最终 H.264 仍有损。默认 48 帧批次、960×540 时，PPM 缓冲约 71 MiB/相机，不代表进程总内存上限。
+直接路径使用无损 RGB PPM `FrameSequence`，由 LeTools 编码；四路相机各自顺序解码原视频，另有图像统计解码，适合少量数据或调试。示例的 libx264 在已验证后端默认使用 CRF 23，不等同于 provider 的软件 CRF18 或 NVENC CQ16 配方。`prepare --video-encoder` 不作用于这个 LeTools 直接路径。PPM 是无损中间帧，最终 H.264 仍有损。默认 48 帧批次、960×540 时，PPM 缓冲约 71 MiB/相机，不代表进程总内存上限。
+
+### 编码速度、画质与资源取舍
+
+`--video-encoder libx264` 保留原有 CRF18 软件编码，适合没有可用 NVENC 或希望生成较小文件的情况；`--video-encoder h264_nvenc` 要求探测成功，否则明确失败。`auto` 只在探测阶段回退，真实批量编码中发生故障不会混用编码器继续完成。
+
+已验证的 24 条批次中，NVENC CQ16 视频体积约为原软件配方的 **3.896 倍**；融合批次的进程树采样峰值 RSS 约 **7.77 GB**。这是指定机器和样本的测量，不是固定倍率或内存上限。两条完整质量样本、9,084 个相机帧相对同一原始图像的 RGB/YUV 平方误差均不大于软件 CRF18；不能据此承诺任意数据上的无损视频。完整证据和范围见[第二阶段实验](docs/PERFORMANCE_ROUND2.md)。并发越高会同时占用更多 CPU、主存及编码会话；NVENC 最多 12 条录制、48 个相机会话，单会话探测不保证任何显卡都支持这个并发，可降低 workers 或固定软件编码。
 
 ## 准备缓存与复用
 
@@ -210,12 +259,15 @@ cache/
 1. 格式为当前 `tianji-thor-v4`。
 2. 除 task 外的 `TianjiConfig` 完全一致；即使某参数本次未实际影响输出，也参与比较。
 3. 再次对原始目录执行 prepare 时，MCAP 路径、大小、修改时间指纹一致，引用资源存在。指纹不是内容哈希。
+4. `prepare` 还核对清单中的编码配方：`auto` 只接受本包已验证的 libx264 CRF18 配方或当前 NVENC CQ16/Main 配方；显式编码器请求必须匹配对应配方。旧软件清单没有 `options` 字典仍可按既有质量字段识别，其他 CQ/profile/配方不能借 auto 绕过检查。
 
-只改 task 可复用视频缓存并重新生成目标元数据；改 FPS、wrench-fps、任何对齐/裁剪参数需新缓存。直接打开缓存不会重新核对原始录制指纹，也不重新诊断原始数据。已有不匹配目录和未完成缓存拒绝覆盖；失败可能留下不完整目录，可保留排查并选择新目录重试。
+只改 task 可复用视频缓存并重新生成目标元数据；改 FPS、wrench-fps、任何对齐/裁剪参数需新缓存。0.6.0/0.6.1 的有效 v4 软件缓存可继续使用；改用显式 NVENC 请求不能把已有软件码流自动改成硬件码流，需新目录。命中可复用缓存不探测 GPU。直接打开缓存的 `TianjiSource` 只核对格式、语义配置和资源，不重新核对原始指纹、不诊断原始数据，也不执行 `prepare` 的编码配方选择/白名单。已有不匹配目录和未完成缓存拒绝覆盖。
+
+融合入口的运行期快照比普通 prepare 的复用指纹更广：记录选中路径及真实路径、MCAP/YAML/JSON 文件身份、大小、mtime/ctime，在开始、检查完成和清单写入前比较。它不是源内容哈希或文件锁，也不是跨调用复用旧检查结果的凭据。报告和选择信息由 API 返回，调用者负责另存 JSON；成功 manifest 内包含 `source_selection`，逐点审计仍在 NPZ。
 
 Prepare 在视频编码/统计阶段每条四宫格完整解码一次，同时编码四路；完成选中帧后仍继续解码尾部检查映射。对齐阶段另读时间戳和首帧。如果前面执行 deep check，那是额外一次完整解码，不能把 check+prepare 全流程称为只解码一次。
 
-数值 MCAP 在一次原始 source 加载中每条读取一次，check 和后续 prepare 是不同加载。原始 source 保留全部已对齐低维表格与审计数组，内存随总帧数增长；RGB 图像流式处理。Prepare 数值加载和视频阶段分别按录制有界并行，默认进程数为 `min(12,max(1,可用CPU数-2),录制数)`；这是数量上限，不是 CPU 绑定或保证两核空闲。视频阶段优先启动较长轨迹以减少末尾空等，输出索引顺序保持不变。每个视频 worker 一个解码器、四个单线程编码器。`tianji-provider prepare/check --workers 1` 可串行运行；该选项不改变缓存语义，与 LeTools 的 workers 不同。
+数值 MCAP 在一次原始 source 加载中每条读取一次，独立 check 和后续 prepare 是不同加载。原始 source 保留全部已对齐低维表格与审计数组，内存随总帧数增长；RGB 图像流式处理。普通 prepare 的数值和视频分别按录制并行，融合 API 则在同一录制任务内检查并准备。自动进程数为 `min(12,max(1,可用CPU数-2),录制数)`；显式正整数可覆盖 CPU 自动选择，但 NVENC 视频/融合任务仍最多 12。该公式不是 CPU 绑定或保证两核空闲。普通 prepare 按输出帧数、融合 API 按 metadata 时长提示优先启动长任务，输出与报告顺序不变。每个视频 worker 一个解码器、四个单线程编码器；`--workers 1` 或 API `workers=1` 可串行。
 
 数字统计基于最终 float32；wrench 的 min/max/mean/std 保留 `[N,12]`，逐窗口位置/分量跨行统计，count 为行数。图像统计使用选中 RGB 像素通道直方图，重复帧计权，范围归一化到 0–1；这是 H.264 编码前统计。对齐摘要随 `meta/info.json` 的 `tianji` 字段输出，逐行 `alignment.npz` 留在缓存；需要追溯时应保留缓存。
 
@@ -223,13 +275,13 @@ Prepare 在视频编码/统计阶段每条四宫格完整解码一次，同时�
 
 Check 默认按录制并行，但逐条结果、跨录制尺寸校验和进度回调保持稳定目录顺序。新并发参数及 Python 调用要求见 [参数详解](docs/PARAMETERS.md)。
 
-Web worker 使用相同配置执行 `check → prepare → convert → deep validation → publish`。网页“仅检查”在 check 后返回，不编码输出。
+0.6.2 配套 Web 转换流程为 `check_prepare → convert → deep validation → publish`，使用同一配置的融合 API，阶段显示为“检查并准备”。网页“仅检查”仍调用独立 check，不编码输出。只有 provider 更新而平台 worker 尚未更新时，旧网页仍会走两个独立阶段；实际部署版本以 `/api/environment` 和任务阶段为准。
 
-- 正式转换重新深度检查；选中任意一条有 error 就整批停止，不自动跳过或删除异常轨迹，warning/info 不直接阻止。
+- 正式转换重新执行全部深度检查，融合 API 固定 `prepare_valid_only=False`；选中任意一条有 error 就不生成成功缓存、不进入 LeTools 转换或最终发布。可能保留未完成准备文件，但不自动跳过或删除异常轨迹，warning/info 不直接阻止。
 - 平台额外核对检查/准备期间源文件是否变化，要求新目标目录，在暂存输出 deep validation 成功后发布。
 - 网页、任务队列、目录选择、进度、取消、数据集登记和工具入口由 data-web-platform 提供；不是 provider 标准接口的一部分。
 - 页面发现列表来自指定 LeTools 环境；其他 provider 被发现不代表网页已适配其参数表单。
-- 独立 provider CLI/API 不会自动获得 Web 的源文件变化保护和发布流程。页面历史默认 task 为 `Plug in the Ethernet cable`，其他任务必须主动填写对应文本。
+- 融合 API 自带运行期源快照检查，独立 check/prepare CLI 不自动获得相同保护；它们都不代替 Web 的最终暂存、deep validation 和不覆盖发布流程。页面历史默认 task 为 `Plug in the Ethernet cable`，其他任务必须主动填写对应文本。
 
 ## 限制、参考与测试
 
@@ -245,4 +297,4 @@ Web worker 使用相同配置执行 `check → prepare → convert → deep vali
 python -m pytest -q tianji_provider/tests
 ```
 
-自带测试覆盖命令空流与错开边界、阈值、全路缺口、观测缺失、首尾裁剪、坏命令、旧缓存拒绝，以及多速率网格、无滤波因果取样、窗口内部缺口、嵌套 Parquet、编译解码差分、并行顺序/取消/崩溃与精确像素统计。真实 MCAP 集成测试通过环境变量显式启用，命令见 [验证记录](VALIDATION.md)。历史脚本、旧测试和大体积产物不随仓库分发。0.6.0 曾改变字段和采样语义；0.6.1 不再改变语义，满足同配置/源指纹条件的 v4 缓存可以继续复用。
+自带测试覆盖命令空流与错开边界、阈值、全路缺口、观测缺失、首尾裁剪、坏命令、旧缓存拒绝、多速率力窗口、嵌套 Parquet、编译解码差分、并行顺序/取消/崩溃与精确像素统计，也覆盖编码器探测/配方匹配、融合诊断等价、有效子集重编号和失败不发布清单。真实 MCAP 集成测试通过环境变量显式启用，命令见 [验证记录](VALIDATION.md)。历史脚本、旧测试和大体积产物不随仓库分发。0.6.0 曾改变字段和采样语义；0.6.2 保持数值与信号规则，v4 缓存兼容性按本页语义配置、资源和编码配方规则判断。

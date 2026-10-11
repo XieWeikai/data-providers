@@ -1,4 +1,4 @@
-# 内部设计（0.6.1）
+# 内部设计（0.6.2）
 
 [返回使用手册](../README.md) · [参数详解](PARAMETERS.md) · [检查与报错](CHECKS.md)
 
@@ -16,9 +16,11 @@ flowchart LR
     lt --> v21[LeRobot v2.1]
     lt --> v30[LeRobot v3.0]
     check[check 独立诊断] --> reader
+    raw --> fused[check_and_prepare 融合 API]
+    fused --> prep
 ```
 
-这个图表达逻辑关系：check 复用读取与对齐算法，但不会把检查产生的表格自动传给下一次独立 prepare。两个命令是独立进程；报告也不是转换授权文件。
+这个图表达逻辑关系：独立 check 复用读取与对齐算法，但不会把检查产生的表格自动传给下一次独立 prepare；即使在同一 Python 进程中先后调用，也不会自动共享结果。报告不是转换授权文件。融合 API 在一次调用内显式共享中间结果和视频帧流，成功时写出相同的 v4 缓存，不使用全局隐式缓存。
 
 ## SourceProvider 与 DatasetSource 的职责
 
@@ -65,6 +67,8 @@ tianji = "tianji_provider.provider:provider"
 | [diagnostics.py](../src/tianji_provider/diagnostics.py) | 逐条检查、错误分类、缺口明细与进度回调 | 允许数值/视频独立检查，一条失败后仍检查其他条 |
 | [execution.py](../src/tianji_provider/execution.py) | 有界 spawn 进程调度、失败清理 | 执行资源独立于数据语义；任务异常、意外退出、提前关闭均回收进程 |
 | [prepare.py](../src/tianji_provider/prepare.py) | 缓存写入、H.264 编码、完成清单、复用判断 | 把有副作用的准备操作与只读 source 分开 |
+| [encoding.py](../src/tianji_provider/encoding.py) | 编码配方、独立进程探测、软件回退、编码并发上限和缓存配方匹配 | 不把硬件可用性或质量参数混进信号配置，不让崩溃的探测拖垮调用进程 |
+| [fused.py](../src/tianji_provider/fused.py) | 单次读取/对齐/完整解码同时诊断与准备，明确选择策略、源快照和结果合并 | 复用昂贵工作，同时保留检查覆盖与全批拒绝边界 |
 | [cli.py](../src/tianji_provider/cli.py) | check/inspect/prepare 子命令、报告与退出码 | 提供辅助工具，不承担目标 LeRobot 后端职责 |
 | [__init__.py](../src/tianji_provider/__init__.py) | 包版本和 LeTools 导入引导 | 避免入口发现与直接导入 provider 子模块时的初始化顺序问题 |
 | [tests/test_wrench_windows.py](../tests/test_wrench_windows.py) / [test_recording_integration.py](../tests/test_recording_integration.py) | 高频力窗口和可选真实录制端到端验收 | 验证源样本、时间网格、缓存和两个 LeRobot 后端 |
@@ -143,17 +147,44 @@ Report 记录候选边界、裁剪前后帧数、trim 窗口、每路无效帧�
 
 PPM 避免旧 JPEG 中间帧先损失细节，代价是较大的批次内存。随机读取 FrameSequence 会建立新的顺序解码过程，不代表 MP4 任意位置 O(1) 读取。Prepare 每个 worker 用一个解码器同时裁出四路，流式编码与计算 RGB 通道直方图；重复帧复用裁分画面并按重复次数计入统计。
 
-RGB 统计对所有选中像素精确计数，不抽样。普通单图（像素数 ≤ 2^24）用 OpenCV calcHist，float32 的每个整数计数在该范围精确，先转 int64 再乘重复帧权重并累计；超过该尺寸回退原 NumPy bincount，避免浮点计数丢失。图像依然是 RGB，按原通道顺序统计，不转 BGR；min/max/mean/std/count 的公式不变。仅引入 headless OpenCV，不更改全局 OpenCV 线程设置，也不改变 H.264 编码路径。
+RGB 统计对所有选中像素精确计数，不抽样。普通单图（像素数 ≤ 2^24）用 OpenCV calcHist，float32 的每个整数计数在该范围精确，先转 int64 再乘重复帧权重并累计；超过该尺寸回退原 NumPy bincount，避免浮点计数丢失。图像依然是 RGB，按原通道顺序统计，不转 BGR；min/max/mean/std/count 的公式不变。不更改全局 OpenCV 线程设置；两种 H.264 编码器都使用编码前同一组 RGB 统计，不能用压缩后的图像统计替换。
 
-Prepare 的数值 source 按 bag 并行读取/对齐，表格/审计写入在父进程，视频随后按 bag 有界并行。两阶段复用同一 workers 选择，不同时创建两套池。视频任务只传本条路径、尺寸、输出路径及帧索引，不 pickle 完整 DataSource。子进程返回图像统计和耗时，父进程按原录制顺序合并清单。只有所有视频任务成功后才写清单；异常会终止并 join 池中其余任务。子进程继承调用方进程组，Web 的进程组取消可覆盖完整树。`workers` 不进入 TianjiConfig 或缓存身份。
+普通 prepare 的数值 source 按 bag 并行读取/对齐，表格/审计写入在父进程，视频随后按 bag 有界并行，不同时创建两套池。自动 worker 数为 `min(12,max(1,可用CPU数-2),任务数)`，NVENC 视频并发另有 12 条录制上限，显式更大的 workers 也不能绕过。视频按输出帧数由长到短启动，结果映射回原录制顺序。任务只传本条路径、尺寸、输出路径、帧索引及同一个 `EncoderSpec`，不 pickle 完整 DataSource。子进程返回图像统计和耗时，父进程汇总；异常会终止并 join 池中其余任务。子进程继承调用方进程组，Web 的进程组取消可覆盖完整树。`workers` 不进入 TianjiConfig 或缓存身份。
 
 Prepare 写数值和审计后编码，清单最后写入；它是完成标识，但整个 prepare 目录写入并非平台式原子发布。失败会留下未完成目录，不会被当成有效缓存。转换输出由 LeTools 管理，8095 在此之上还加自己的暂存/深度验证/发布阶段。
 
+### 编码器选择与质量边界
+
+准备阶段提供两套明确配方：软件 `libx264` 使用 CRF18 / veryfast；硬件 `h264_nvenc` 使用 VBR / CQ16 / p4 / HQ / Main。都保持 H.264、yuv420p、原始单路尺寸、无 B 帧和 GOP=fps。选择只影响输出压缩视频，不改变数值、帧索引、选择时刻或精确 RGB 统计；CQ 与 CRF 不可按数字直接比较。
+
+`video_encoder="auto"` 每次新的准备调用只探测一次。父进程在独立 Python 子进程中尝试当前 NVENC 配方，对六个合成帧执行编码、flush、完整解码，检查 profile、尺寸、像素格式、PTS/DTS 和帧数；默认探测超时 20 秒。子进程不脱离调用方进程组。探测失败、超时或原生崩溃时 auto 才选择 x264；显式 h264_nvenc 失败直接抛出。软件请求不运行 GPU 探测。批量真正编码发生错误时一律失败，不能静默回退后混合配方。
+
+每条视频 worker 仍只有一个解码器和四个单线程编码器。12 条 NVENC 录制意味着最多 48 个相机会话，探测单会话成功不保证所有机器都支持该并发。缓存记录 `video_encoding` 的真实 encoder/options/质量设置，以及 `video_encoder_selection` 的选择和探测结果；不把 NVENC 的 CQ 写成 CRF。
+
+24 条验收中，NVENC 配方的视频字节数约为软件 CRF18 的 3.896 倍；融合批次进程树采样峰值 RSS 约 7.77 GB。质量证据为两条、9,084 个相机帧的逐帧 RGB/YUV 误差对照，不能扩写为任意轨迹无损或固定内存上限。具体实验范围见 [PERFORMANCE_ROUND2.md](PERFORMANCE_ROUND2.md)。
+
+### 融合检查与准备的生命周期
+
+`check_and_prepare(root,destination,config,...)` 是独立的显式 API，当前没有对应 CLI 子命令。其工作顺序如下：
+
+1. 用 check 的目录发现规则纳入不完整录制；验证新目标不在原始根或任何选中录制真实目录内，保存选择/源快照。
+2. 父进程选择一次编码器。auto/硬件请求可读取首个可用视频帧确定探测尺寸，随后所有 worker 共用配方和硬件并发上限。metadata 时长只作为长任务优先的提示，坏提示不豁免后续验证。
+3. 每个 worker 独立尝试数值和视频时间戳读取，执行 align 和 timing_issues，保留处理后的数组与审计后释放原始高频 signals。数值失败时仍执行完整视频检查。
+4. 完整解码视频时，每帧先检查尺寸、顺序、数量，再按对齐索引统计和编码。被裁剪头尾也检查，不能在最后选中帧处提前停止。解码帧不跨进程传输。
+5. 父进程按输入顺序执行跨录制尺寸检查、发布 progress 回调和汇总。普通数据错误进入完整报告；编码器、文件系统、进程崩溃和取消是运行失败，不伪装成某条数据检查通过。
+6. 核对源快照并应用显式选择规则，生成连续 episode/global index、表格与 NPZ，再次核对快照，最后写成功清单。
+
+默认 `prepare_valid_only=False` 时，任一录制 error 就返回 `report`、`selection` 与 `manifest=None`。中间可能已经生成其他录制的视频，但没有可打开的成功缓存，更没有最终 LeRobot 发布。显式 True 时，所有输入仍检查，报告仍保留失败状态；只给有效项写成功缓存，并在 `source_selection` 保存拒绝项和原始索引到新 episode 的映射。全部无效仍无 manifest。保留 worker 的原录制文件夹避免重命名覆盖失败诊断；有效子集的文件夹编号可有空档，逻辑索引必须连续。
+
+融合阶段的 `report.seconds` 和 `timings.checked_prepare_seconds` 包含准备工作，不能当作与编码独立的 check 时间，也不能与另一个虚构 prepare 时间相加。报告由 API 返回，调用者负责保存；manifest 保存成功项的对齐报告与选择记录。API 自身只生成缓存，最终目标验证和发布仍由调用方控制。
+
 ## 缓存、计划和版本
 
-三个版本概念独立：包版本 `0.6.1`、provider API `2`、缓存格式 `tianji-thor-v4`；目标可以是 LeRobot v2.1 或 v3.0。0.6.1 的性能优化保持 0.6.0 内容语义，不升级缓存格式。
+三个版本概念独立：包版本 `0.6.2`、provider API `2`、缓存格式 `tianji-thor-v4`；目标可以是 LeRobot v2.1 或 v3.0。0.6.2 保持 0.6.0 的字段与信号语义，编码配方单独记录在 manifest，不升级缓存格式。
 
-缓存复用比较格式、完整配置（排除 task）和源文件指纹。指纹记录 MCAP 的路径、大小、mtime，不是内容校验和；直接打开缓存只验证格式/配置和资源，不重新读取原始 MCAP。Planner identity 则包含实现格式标识与全部配置哈希，作用于转换计划身份；不能代替缓存/源文件校验。
+普通 prepare 的缓存复用比较格式、完整配置（排除 task）、MCAP 路径/大小/mtime 指纹，以及请求对应的编码配方白名单。auto 接受旧/当前 x264 CRF18 或当前 NVENC CQ16/Main 配方；显式请求只接受自身配方，旧 x264 缺少 options 字典可按其质量字段识别。任意 H.264 或其他 CQ/profile 不能借 auto 直接复用。缓存命中不再探测 GPU。
+
+融合入口始终要求新目录。它的运行期快照另记录选中逻辑/真实路径及 MCAP/YAML/JSON 的设备号、inode、大小、mtime/ctime，在开始、检查结束、写清单前比较；不是文件内容哈希或文件锁。直接打开缓存的 TianjiSource 只验证格式/语义配置/资源，不读取原始 MCAP、不重做检查或 prepare 的配方白名单。Planner identity 包含实现格式标识与全部 TianjiConfig 哈希，不包括这些执行参数，不能代替缓存/源文件校验。
 
 原始 source 一次加载会保留所有对齐后的低维表格；准备源按需读取 Parquet。Media/data profile 告诉 LeTools 哪些 episode 共享物理资源、大小和是否要编码，使核心规划器无需理解 MCAP。
 
@@ -163,7 +194,7 @@ Check 使用同一有界执行模块并行处理录制；结果虽可乱序完�
 
 Check 的目标是完整的逐条诊断，因此数值与视频分支独立尝试，之后才能执行对齐与结构化缺口分析。Source 的目标是提供可靠数据，遇到不满足契约的输入就失败；inspect 走这个 source 路径，但关闭图像统计。Prepare 同样使用 source 的对齐结果并负责写缓存。三者共享核心算法，报告形态与失败策略不同。
 
-8095 使用 check 作整批拦截，再 prepare 和 convert；检查通过不能保证磁盘、编码器、输出目录或后端永不失败，后续错误仍终止任务。网页添加的进度、源文件变化检查、任务取消、路径边界和发布机制不属于 provider 接口。
+0.6.2 配套 Web 使用严格模式的融合 API，再 convert、deep validation 和不覆盖发布；检查与准备阶段如实标为 `check_prepare`。仅检查按钮仍执行独立 check。融合时可能先产生未完成准备文件，整批通过才允许后续转换；Web 不启用有效子集模式。检查通过不能保证磁盘、编码器、输出目录或后端永不失败。仅安装新版 provider 不会自动改写旧 Web worker，实际流程由平台部署版本决定。
 
 ## 扩展时的约束
 
