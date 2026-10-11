@@ -12,11 +12,11 @@ import pyarrow.parquet as pq
 from letools.model import DatasetMetadata, Episode, EpisodeDataProfile, MediaProfile, VideoSlice
 from letools.plugins.base import DatasetSource
 
-from .alignment import align
+from .alignment import WRENCH_TOPICS, align, output_grids, previous_indices
 from .media import CAMERAS, TianjiFrames, dimensions, image_statistics
 from .reader import bag_files, discover, read_numeric, read_video_times, video_files
 
-FORMAT = "tianji-thor-v3"
+FORMAT = "tianji-thor-v4"
 GENERATED = {"timestamp": "float32", "frame_index": "int64", "episode_index": "int64", "index": "int64", "task_index": "int64"}
 
 
@@ -31,19 +31,26 @@ def arrow_table(columns):
     for key, values in columns.items():
         values = np.ascontiguousarray(values)
         array = pa.array(values.reshape(-1))
-        if values.ndim == 2:
-            array = pa.FixedSizeListArray.from_arrays(array, values.shape[1])
+        for size in reversed(values.shape[1:]):
+            array = pa.FixedSizeListArray.from_arrays(array, size)
         arrays[key] = array
     return pa.table(arrays)
 
 
-def features(width, height, fps, codec="ppm"):
+def features(width, height, fps, codec="ppm", *, wrench_fps=200):
     joints = [*[f"left_joint_{i}_rad" for i in range(1, 8)], "left_gripper_normalized",
               *[f"right_joint_{i}_rad" for i in range(1, 8)], "right_gripper_normalized"]
     result = {
         "observation.state": {"dtype": "float32", "shape": [16], "names": joints},
         "observation.action": {"dtype": "float32", "shape": [16], "names": joints},
-        "observation.wrench": {"dtype": "float32", "shape": [12], "names": [f"{s}_{v}" for s in ("left_flange", "right_flange") for v in ("fx_N", "fy_N", "fz_N", "tx_Nm", "ty_Nm", "tz_Nm")]},
+        "observation.wrench_windows": {
+            "dtype": "float32", "shape": [wrench_fps // fps, 12], "names": None,
+            "sampling_rate_hz": wrench_fps, "sampling_policy": "previous_raw_sample",
+            "window_anchor": "last_sample", "filtered": False,
+            "sample_offsets_seconds": [i / wrench_fps for i in range(1 - wrench_fps // fps, 1)],
+            "component_names": [f"{s}_{v}" for s in ("left_flange", "right_flange")
+                                for v in ("fx_N", "fy_N", "fz_N", "tx_Nm", "ty_Nm", "tz_Nm")],
+        },
         "observation.eef": {"dtype": "float32", "shape": [14], "names": [f"{s}_{v}" for s in ("left_base_link", "right_base_link") for v in ("x_m", "y_m", "z_m", "qx", "qy", "qz", "qw")]},
     }
     for key, dtype in GENERATED.items():
@@ -100,6 +107,12 @@ class TianjiSource(DatasetSource):
                 descriptors.append(Episode(index, length, (self.config.task,), {k: statistics(v) for k, v in values.items()}, bag, data_end=length, videos=media))
                 audit[index] = {"bag": str(bag), "absolute_time_ns": grid, "video_packet_index": indices,
                                 "video_time_ns": vt[indices], "data_physical_bytes": physical}
+                _, windows = output_grids(report["intersection_start_ns"], report["intersection_end_ns"], self.config)
+                first = report["wrench_sampling"]["first_window_index"]
+                windows = windows[first:first + length]
+                audit[index].update(wrench_time_ns=windows, wrench_sample_time_ns=np.stack([
+                    signals[k].times[previous_indices(signals[k].times, windows.ravel())].reshape(windows.shape)
+                    for k in WRENCH_TOPICS], axis=2))
                 offset += length
             if self._collect_image_stats:
                 group = [e for e in descriptors if e.data_path == bag]
@@ -107,7 +120,8 @@ class TianjiSource(DatasetSource):
                 for ep in group:
                     ep.stats.update(image_stats[ep.index])
         assert expected_size is not None
-        return self._finish(descriptors, rows, reports, audit, features(*expected_size, self.config.fps))
+        return self._finish(descriptors, rows, reports, audit,
+                            features(*expected_size, self.config.fps, wrench_fps=self.config.wrench_fps))
 
     def _finish(self, descriptors, rows, reports, audit, schema):
         n = len(descriptors)
@@ -122,7 +136,7 @@ class TianjiSource(DatasetSource):
     def _load_prepared(self):
         manifest = json.loads((self.root / "tianji-cache.json").read_text())
         if manifest.get("format") != FORMAT:
-            raise ValueError("Unsupported Tianji cache version; rebuild with command-union timing and state fallback")
+            raise ValueError("Unsupported Tianji cache version; rebuild from raw MCAP with control gripper actions and unfiltered wrench windows")
         semantic = asdict(self.config)
         semantic.pop("task")
         if semantic != manifest["alignment_config"]:

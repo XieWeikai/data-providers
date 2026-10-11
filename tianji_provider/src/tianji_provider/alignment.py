@@ -25,6 +25,19 @@ def previous_indices(times, grid):
     return indices
 
 
+def output_grids(start, end, config):
+    """Partition a single rational high-rate grid into complete causal windows.
+
+    A row is anchored at the last sample of its window. No padding, overlapping
+    windows, future samples, or phase drift when the periods are fractional ns.
+    At most N-1 samples at the end are omitted to keep the feature shape fixed.
+    """
+    size = config.wrench_fps // config.fps
+    high = uniform_grid(start, end, config.wrench_fps)
+    windows = high[:len(high) // size * size].reshape(-1, size)
+    return windows[:, -1], windows
+
+
 def valid_mask(times, grid, max_gap_ns, causal=False):
     left = previous_indices(times, grid)
     if causal:
@@ -42,14 +55,15 @@ def runs(mask):
 COMMAND_STATE = {
     "/tj/control/joint_cmd_A": ("/tj/joint_states", slice(0, 7)),
     "/tj/control/joint_cmd_B": ("/tj/joint_states", slice(7, 14)),
-    "/info/gripper_target_L": ("/info/gripper_feedback_L", slice(None)),
-    "/info/gripper_target_R": ("/info/gripper_feedback_R", slice(None)),
+    "/control/gripperValueL": ("/info/gripper_feedback_L", slice(None)),
+    "/control/gripperValueR": ("/info/gripper_feedback_R", slice(None)),
 }
 FEEDBACK_TOPICS = ("/tj/joint_states", "/info/gripper_feedback_L", "/info/gripper_feedback_R")
+WRENCH_TOPICS = ("/tj/info/wrench_left", "/tj/info/wrench_right")
 
 
 def command_age_ns(topic, config):
-    age = config.gripper_max_gap_ms if "gripper_target" in topic else config.command_max_age_ms
+    age = config.gripper_max_gap_ms if topic.startswith("/control/gripperValue") else config.command_max_age_ms
     return round(age * 1e6)
 
 
@@ -175,12 +189,14 @@ def pose_interpolate(signal, grid, fps, max_gap_ns, mode):
 def align(signals, ranges, video_times, config):
     ranges = {**ranges, "video": [int(video_times[0]), int(video_times[-1]), len(video_times)]}
     start, end = candidate_interval(signals, ranges, video_times, config)
-    grid = uniform_grid(start, end, config.fps)
+    grid, wrench_grid = output_grids(start, end, config)
     if len(grid) < 2:
         raise ValueError("The common interval must contain at least two output frames")
     masks = {}
     for topic, signal in signals.items():
-        if topic not in COMMAND_STATE:
+        if topic in WRENCH_TOPICS:
+            masks[topic] = valid_mask(signal.times, wrench_grid.ravel(), round(config.max_gap_ms * 1e6)).reshape(wrench_grid.shape).all(axis=1)
+        elif topic not in COMMAND_STATE:
             masks[topic] = valid_mask(signal.times, grid, round(config.max_gap_ms * 1e6))
     video_indices = previous_indices(video_times, grid)
     masks["video"] = grid - video_times[video_indices] <= round(config.max_gap_ms * 1e6)
@@ -203,6 +219,7 @@ def align(signals, ranges, video_times, config):
                                               config.motion_gripper_threshold)
     original_grid = grid
     grid = grid[trim_start:trim_stop]
+    wrench_grid = wrench_grid[trim_start:trim_stop]
     video_indices = video_indices[trim_start:trim_stop]
     rejected = {k: int(np.sum(~mask[trim_start:trim_stop])) for k, mask in masks.items()}
     failures = {topic: count for topic, count in rejected.items() if count}
@@ -219,7 +236,11 @@ def align(signals, ranges, video_times, config):
     for topic, s in signals.items():
         if topic in COMMAND_STATE or topic in resampled:
             continue
-        if "/eef_" in topic:
+        if topic in WRENCH_TOPICS:
+            # Preserve actual measured values: no FIR, average, or interpolation.
+            # Validity was checked at EVERY high-rate point, not only row anchors.
+            value = s.values[previous_indices(s.times, wrench_grid.ravel())].reshape(*wrench_grid.shape, 6)
+        elif "/eef_" in topic:
             value = pose_interpolate(s, grid, config.fps, round(config.max_gap_ms * 1e6), config.state_resampling)
         else:
             value = interpolate(s.times, s.values, grid, config.fps, round(config.max_gap_ms * 1e6), config.state_resampling)
@@ -235,9 +256,9 @@ def align(signals, ranges, video_times, config):
     columns = {
         "observation.state": np.column_stack((r["/tj/joint_states"][:, :7], r["/info/gripper_feedback_L"],
                                                 r["/tj/joint_states"][:, 7:], r["/info/gripper_feedback_R"])),
-        "observation.action": np.column_stack((r["/tj/control/joint_cmd_A"], r["/info/gripper_target_L"],
-                                                 r["/tj/control/joint_cmd_B"], r["/info/gripper_target_R"])),
-        "observation.wrench": np.column_stack((r["/tj/info/wrench_left"], r["/tj/info/wrench_right"])),
+        "observation.action": np.column_stack((r["/tj/control/joint_cmd_A"], r["/control/gripperValueL"],
+                                                 r["/tj/control/joint_cmd_B"], r["/control/gripperValueR"])),
+        "observation.wrench_windows": np.concatenate((r[WRENCH_TOPICS[0]], r[WRENCH_TOPICS[1]]), axis=2),
         "observation.eef": np.column_stack((r["/tj/info/eef_left"], r["/tj/info/eef_right"])),
     }
     result = [(grid, {k: v.astype(np.float32) for k, v in columns.items()}, video_indices)]
@@ -254,6 +275,15 @@ def align(signals, ranges, video_times, config):
                  "output_start_ns": int(grid[0]), "output_end_ns": int(grid[-1])},
         "segments": [{"start_ns": int(grid[0]), "end_ns": int(grid[-1]), "frames": len(grid)}],
         "invalid_frames_by_signal": rejected, "signal_ranges_ns": ranges,
+        "wrench_sampling": {
+            "fps": config.wrench_fps, "samples_per_frame": config.wrench_fps // config.fps,
+            "policy": "previous_raw_sample", "filtered": False,
+            "window_anchor": "last_sample", "grid_origin_ns": int(start),
+            "first_sample_ns": int(wrench_grid[0, 0]), "last_sample_ns": int(wrench_grid[-1, -1]),
+            "first_window_index": trim_start,
+            "max_sample_age_ms": {k: float(np.max(wrench_grid.ravel() - signals[k].times[
+                previous_indices(signals[k].times, wrench_grid.ravel())]) / 1e6) for k in WRENCH_TOPICS},
+        },
         "command_fallback_policy": "current_aligned_state",
         "command_coverage_policy": "at_least_one_fresh_command",
         "minimum_fresh_command_topics": int(command_counts.min()),

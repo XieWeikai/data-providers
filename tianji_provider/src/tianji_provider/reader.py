@@ -20,7 +20,7 @@ TYPES = {
     "/tj/control/joint_cmd_A": "marvin_msgs/msg/JointcmdArm",
     "/tj/control/joint_cmd_B": "marvin_msgs/msg/JointcmdArm",
     **{f"/info/gripper_feedback_{s}": "std_msgs/msg/Float32MultiArray" for s in ("L", "R")},
-    **{f"/info/gripper_target_{s}": "std_msgs/msg/Float32" for s in ("L", "R")},
+    **{f"/control/gripperValue{s}": "std_msgs/msg/Float32" for s in ("L", "R")},
     **{f"/tj/info/eef_{s}": "geometry_msgs/msg/PoseStamped" for s in ("left", "right")},
     **{f"/tj/info/wrench_{s}": "geometry_msgs/msg/WrenchStamped" for s in ("left", "right")},
     "/info/web_gripper": "std_msgs/msg/String",
@@ -139,7 +139,7 @@ def read_numeric(bag):
             if len(msg.data) != 5:
                 raise ValueError(f"{topic}: expected five motor feedback values")
             value = [msg.data[0]]
-        elif "gripper_target" in topic:
+        elif topic.startswith("/control/gripperValue"):
             if not 0 <= msg.data <= 1:
                 raise ValueError(f"{topic}: target must be normalized to [0, 1]")
             value = [msg.data]

@@ -61,7 +61,8 @@ def prepare(root, destination, config):
         pq.write_table(source.read_episode(ep), folder / "data.parquet")
         a = source.audit(ep)
         np.savez(folder / "alignment.npz", absolute_time_ns=a["absolute_time_ns"],
-                 video_packet_index=a["video_packet_index"], video_time_ns=a["video_time_ns"])
+                 video_packet_index=a["video_packet_index"], video_time_ns=a["video_time_ns"],
+                 wrench_time_ns=a["wrench_time_ns"], wrench_sample_time_ns=a["wrench_sample_time_ns"])
         entries.append({"index": ep.index, "length": ep.length, "stats": dict(ep.stats),
                         "data": str((folder / "data.parquet").relative_to(destination)),
                         "audit": str((folder / "alignment.npz").relative_to(destination)),
@@ -82,7 +83,7 @@ def prepare(root, destination, config):
     w = source.metadata.features["observation.image.head_left"]["shape"][1]
     h = source.metadata.features["observation.image.head_left"]["shape"][0]
     manifest = {"format": FORMAT, "alignment_config": options, "source_fingerprint": origin,
-                "features": features(w, h, config.fps, "h264"), "episodes": entries, "reports": source.reports,
+                "features": features(w, h, config.fps, "h264", wrench_fps=config.wrench_fps), "episodes": entries, "reports": source.reports,
                 "video_prepare_seconds": time.perf_counter() - started,
                 "timings": {"source_alignment_seconds": alignment_seconds,
                             "table_write_seconds": tables_seconds,

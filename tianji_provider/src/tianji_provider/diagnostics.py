@@ -7,8 +7,8 @@ import time
 import numpy as np
 
 from . import __version__
-from .alignment import (COMMAND_STATE, FEEDBACK_TOPICS, align, candidate_interval,
-                        command_age_ns, command_samples, runs, uniform_grid)
+from .alignment import (COMMAND_STATE, FEEDBACK_TOPICS, WRENCH_TOPICS, align, candidate_interval,
+                        command_age_ns, command_samples, output_grids, runs)
 from .media import decode_quad, dimensions
 from .reader import read_numeric, read_video_times, video_files
 
@@ -44,11 +44,13 @@ def timing_issues(signals, ranges, video_times, config, alignment=None):
     are informational because the converter supplies the same-frame state.
     """
     start, end = candidate_interval(signals, ranges, video_times, config)
-    grid = uniform_grid(start, end, config.fps)
+    grid, wrench_grid = output_grids(start, end, config)
     output = grid
     if alignment is not None:
         trim = alignment["trim"]
-        output = grid[(grid >= trim["output_start_ns"]) & (grid <= trim["output_end_ns"])]
+        retained = (grid >= trim["output_start_ns"]) & (grid <= trim["output_end_ns"])
+        output = grid[retained]
+        wrench_grid = wrench_grid[retained]
     issues = []
     command_counts = np.zeros(len(output), dtype=np.int8)
     for topic in COMMAND_STATE:
@@ -73,16 +75,21 @@ def timing_issues(signals, ranges, video_times, config, alignment=None):
             continue
         threshold = round(config.max_gap_ms * 1e6)
         scope = grid if topic in FEEDBACK_TOPICS else output
+        if topic in WRENCH_TOPICS:
+            scope = wrench_grid.ravel()
         for index in np.flatnonzero(np.diff(times) > threshold):
             left, right = int(times[index]), int(times[index+1])
             invalid_after = left + threshold if topic == "video" else left
-            affected = scope[(scope > invalid_after) & (scope < right)]
+            affected_indices = np.flatnonzero((scope > invalid_after) & (scope < right))
+            affected = scope[affected_indices]
             count = len(affected)
+            affected_frames = len(np.unique(affected_indices // wrench_grid.shape[1])) if topic in WRENCH_TOPICS else count
             issues.append(_issue("video_gap" if topic == "video" else "observation_gap",
                 "error" if count else "warning", "Recorded samples exceed the configured observation gap",
                 topic=topic, start_ns=left, end_ns=right, gap_ms=(right-left)/1e6,
                 start_seconds=(left-start)/1e9, end_seconds=(right-start)/1e9,
-                threshold_ms=config.max_gap_ms, affected_frames=count,
+                threshold_ms=config.max_gap_ms, affected_frames=affected_frames,
+                affected_samples=count, sampling_fps=config.wrench_fps if topic in WRENCH_TOPICS else config.fps,
                 first_affected_ns=int(affected[0]) if count else None,
                 last_affected_ns=int(affected[-1]) if count else None,
                 handling="reject_recording" if count else "outside_required_output_samples"))

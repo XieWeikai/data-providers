@@ -1,11 +1,12 @@
 # Tianji provider for LeTools
 
-本文描述 **tianji-provider 0.5.0**：读取 Thor / Tianji / Marvin Pro 的 ROS 2 MCAP 录制，将机器人信号和四路画面对齐，向 LeTools 提供 `DatasetSource`，由 LeTools 输出 LeRobot v2.1 / v3.0。Provider 不连接或控制机器人，读取源数据不需要 ROS 运行环境。
+本文描述 **tianji-provider 0.6.0**：读取 Thor / Tianji / Marvin Pro 的 ROS 2 MCAP 录制，将机器人信号和四路画面对齐，向 LeTools 提供 `DatasetSource`，由 LeTools 输出 LeRobot v2.1 / v3.0。Provider 不连接或控制机器人，读取源数据不需要 ROS 运行环境。
 
 | 文档 | 内容 |
 |---|---|
 | 本页 | 功能、安装、使用流程、输入输出、缓存与限制 |
 | [参数详解](docs/PARAMETERS.md) | 全部 provider 参数的默认值、单位、范围、边界行为、调节影响及缓存关系 |
+| [高频 wrench 窗口](docs/WRENCH_WINDOWS.md) | 窗口形状、因果取样、时间戳、无滤波与降采样限制、训练读取 |
 | [内部设计](docs/DESIGN.md) | SourceProvider / DatasetSource 接口、模块分工、时间算法、数据与媒体生命周期 |
 | [检查与报错](docs/CHECKS.md) | 检查项目、错误代码、严重级别、CLI 退出码及对后续转换的影响 |
 | [验证记录](VALIDATION.md) | 按版本记录的测试范围、实录结果和性能；历史结果不代表当前规则 |
@@ -33,12 +34,13 @@
 
 ## 当前处理规则
 
-- Task 必填（独立 check 除外），目标 FPS 默认 50，接受 1–1000 的整数。
-- 四路 action 命令为 `/tj/control/joint_cmd_A/B`、`/info/gripper_target_L/R`。每个保留时刻至少一路有效，其余填对应同帧 state；默认有效期为关节 100 ms、夹爪目标 150 ms，含阈值端点。
+- Task 必填（独立 check 除外）。主 FPS 默认 50，`--wrench-fps` 默认 200；两者均为 1–1000 的整数，wrench-fps 必须不小于 FPS 且为其整数倍。默认力字段为 `observation.wrench_windows`，每行 `[4,12]`。
+- 四路 action 命令为 `/tj/control/joint_cmd_A/B`、`/control/gripperValueL/R`。每个保留时刻至少一路有效，其余填对应同帧 state；默认有效期为关节 100 ms、夹爪目标 150 ms，含阈值端点。
+- Wrench 始终在独立高频网格取过去最近的真实测量，不滤波、不平均、不插值。每行包含 `N=wrench_fps/fps` 个从旧到新的采样，末点对齐该行时间戳；不再输出 `observation.wrench` 或 `observation.wrench_history`。
 - 真实观测缺口仍严格检查，默认最大间隔/视频帧年龄 100 ms。四路命令同时失效的保留时刻也会失败，不跨越缺口拼接。
 - 一条成功处理的录制对应一个 episode。只裁首尾，不拆轨迹，不删中间网格点，不修改输入。
 - Prepare 固定 H.264 / libx264、CRF 18、veryfast、yuv420p、无 B 帧，保留原始单路尺寸。LeTools 随后复用编码视频，不再有损编码。
-- 当前缓存格式 **`tianji-thor-v3`** 与目标 **LeRobot v3.0** 无关。旧 `tianji-thor-v1/v2` 缓存必须从原始录制重新 prepare；旧视频即使已是 H.264，也不能复用旧时间轴缓存。已有最终 LeRobot 数据集不会被改写或删除。
+- 当前缓存格式 **`tianji-thor-v4`** 与目标 **LeRobot v3.0** 无关。旧 `tianji-thor-v1/v2/v3` 缓存必须从原始录制重新 prepare；旧视频即使已是 H.264，也不能复用旧时间轴缓存。已有最终 LeRobot 数据集不会被改写或删除。
 
 ## 安装与注册
 
@@ -63,7 +65,7 @@ uv pip install --python "$TIANJI_ENV/bin/python" \
   'import tianji_provider; print(tianji_provider.__version__, tianji_provider.__file__)'
 ```
 
-新环境应先按 data-web-platform 部署说明安装完整 LeTools/native 依赖；不要为更新 provider 重建使用中的 `.venv`。依赖已满足且只需重装当前包时可加 `--no-deps`，它不能代替首次依赖安装。确认发现的 `tianji` 版本为 0.5.0、模块路径为预期仓库；不要复制其他全局环境的 provider 配置进来。
+新环境应先按 data-web-platform 部署说明安装完整 LeTools/native 依赖；不要为更新 provider 重建使用中的 `.venv`。依赖已满足且只需重装当前包时可加 `--no-deps`，它不能代替首次依赖安装。确认发现的 `tianji` 版本为 0.6.0、模块路径为预期仓库；不要复制其他全局环境的 provider 配置进来。
 
 Web 服务在启动时发现 providers。更新后确认无运行/排队任务，再重启并读取实际环境：
 
@@ -111,8 +113,8 @@ recordings/
 | 输出字段 | 形状/顺序 | 来源与单位 |
 |---|---|---|
 | `observation.state` | float32[16]：左 7 关节、左夹爪、右 7 关节、右夹爪 | `/tj/joint_states`、`/info/gripper_feedback_L/R.data[0]`；rad、归一化电机行程 |
-| `observation.action` | float32[16]，与 state 对应 | A/B 左/右关节目标、`/info/gripper_target_L/R`；无有效命令的分量补同帧 state |
-| `observation.wrench` | float32[12]：左 Fx/Fy/Fz/Tx/Ty/Tz、右相同 | `/tj/info/wrench_left/right`；N、N·m；flange_L / flange_R |
+| `observation.action` | float32[16]，与 state 对应 | A/B 左/右关节目标、`/control/gripperValueL/R`；无有效命令的分量补同帧 state |
+| `observation.wrench_windows` | float32[N,12]，N=wrench_fps/fps；第一轴时间从旧到新，第二轴左 Fx/Fy/Fz/Tx/Ty/Tz、右相同 | `/tj/info/wrench_left/right`；N、N·m；flange_L / flange_R；未滤波的过去最近测量 |
 | `observation.eef` | float32[14]：左 x/y/z/qx/qy/qz/qw、右相同 | `/tj/info/eef_left/right`；base_link 下的反馈 FK 位姿；m、单位四元数 |
 | `observation.image.head_left` | video[H/2,W/2,3] | 四宫格左上 |
 | `observation.image.head_right` | 同上 | 四宫格右上 |
@@ -126,7 +128,7 @@ recordings/
 
 字段保留用户指定的 `observation.action` 和单数 `observation.image`。训练代码若默认寻找 `action`、`observation.images`，需显式配置映射。
 
-关节按消息 `name` 重排，A 对应左臂、B 对应右臂。夹爪 action 使用驱动已发布目标，不使用可能尚未采用的 `/control/gripperValueL/R`；后两者作为录制的辅助信号仍可能限制交集。
+关节按消息 `name` 重排，A 对应左臂、B 对应右臂。夹爪 action 使用 `/control/gripperValueL/R` 的归一化输入控制命令（Float32，0–1），不使用 `/info/gripper_target_L/R` 的驱动状态目标。输入命令不一定等于执行器最终采用的目标，这正是两类 topic 的语义区别。旧 `/info/gripper_target_L/R` 若仍被录制，仅作为辅助 topic 参与时钟与范围检查；不会被当作备用 action。控制命令缺失时补对应 state。
 
 夹爪归一化读取 `/info/web_gripper` JSON 的 `calibration`，公式是 `(motor_rad - min_rad) / (max_rad - min_rad)`。已验证样本为 `[0,1.6]` rad，代码不硬编码；反馈轻微越出 0–1 不裁剪。它不是毫米开口宽度。标定缺失、中途改变或单位不匹配会失败。
 
@@ -143,7 +145,7 @@ TIANJI_CACHE=/path/to/new-cache-50
 TIANJI_OUTPUT=/path/to/new-lerobot-v21
 TIANJI_REPORT=/path/to/reports/check.json
 TIANJI_TASK='Pick and place'
-TIANJI_ARGS=(--task "$TIANJI_TASK" --fps 50
+TIANJI_ARGS=(--task "$TIANJI_TASK" --fps 50 --wrench-fps 200
   --gap-policy error --max-gap-ms 100
   --command-max-age-ms 100 --gripper-max-gap-ms 150
   --state-resampling lowpass --trim-stationary
@@ -168,7 +170,7 @@ letools validate "$TIANJI_OUTPUT" --deep
 tianji-provider check /path/to/recordings --report /path/to/reports/check.json
 tianji-provider check /path/to/recordings --no-deep-video
 tianji-provider inspect /path/to/recordings \
-  --task 'Pick and place' --fps 50 --report /path/to/reports/alignment.json
+  --task 'Pick and place' --fps 50 --wrench-fps 200 --report /path/to/reports/alignment.json
 ```
 
 Check 可省略 task，配置中使用占位值 `validation`，不会生成训练数据集。`--no-deep-video` 只验证时间戳和首帧，不证明后续视频完整。Check 在一条失败后继续扫描其余轨迹。
@@ -179,7 +181,7 @@ Inspect 解析数值、读取视频时间戳和首帧，计算输出帧数、裁
 
 ```bash
 letools convert /path/to/recordings /path/to/new-lerobot-v21 \
-  --source-format tianji --task 'Pick and place' --fps 50 \
+  --source-format tianji --task 'Pick and place' --fps 50 --wrench-fps 200 \
   --to v2.1 --workers 2 --video-workers 2 \
   --video-codec libx264 --video-pixel-format yuv420p
 ```
@@ -193,7 +195,7 @@ cache/
 ├── tianji-cache.json          # 所有步骤成功后最后写入的完成清单
 ├── episode_000000/
 │   ├── data.parquet           # 已对齐、补齐、裁剪的表格
-│   ├── alignment.npz          # 绝对纳秒时间、原视频包索引和视频时间
+│   ├── alignment.npz          # 主帧/力网格/实际力样本绝对时间，以及视频索引和时间
 │   ├── head_left.mp4
 │   ├── head_right.mp4
 │   ├── left_wrist.mp4
@@ -203,17 +205,17 @@ cache/
 
 缓存是 provider 中间格式，不是最终 LeRobot。清单记录配置、源指纹、字段、episode 路径、统计、对齐报告、编码设置及分阶段耗时。复用要求：
 
-1. 格式为当前 `tianji-thor-v3`。
+1. 格式为当前 `tianji-thor-v4`。
 2. 除 task 外的 `TianjiConfig` 完全一致；即使某参数本次未实际影响输出，也参与比较。
 3. 再次对原始目录执行 prepare 时，MCAP 路径、大小、修改时间指纹一致，引用资源存在。指纹不是内容哈希。
 
-只改 task 可复用视频缓存并重新生成目标元数据；改 FPS、任何对齐/裁剪参数需新缓存。直接打开缓存不会重新核对原始录制指纹，也不重新诊断原始数据。已有不匹配目录和未完成缓存拒绝覆盖；失败可能留下不完整目录，可保留排查并选择新目录重试。
+只改 task 可复用视频缓存并重新生成目标元数据；改 FPS、wrench-fps、任何对齐/裁剪参数需新缓存。直接打开缓存不会重新核对原始录制指纹，也不重新诊断原始数据。已有不匹配目录和未完成缓存拒绝覆盖；失败可能留下不完整目录，可保留排查并选择新目录重试。
 
 Prepare 在视频编码/统计阶段每条四宫格完整解码一次，同时编码四路；完成选中帧后仍继续解码尾部检查映射。对齐阶段另读时间戳和首帧。如果前面执行 deep check，那是额外一次完整解码，不能把 check+prepare 全流程称为只解码一次。
 
 数值 MCAP 在一次原始 source 加载中每条读取一次，check 和后续 prepare 是不同加载。原始 source 保留全部已对齐低维表格与审计数组，内存随总帧数增长；RGB 图像流式处理。Prepare 最多一个解码器、四个编码器，各编码器一线程；LeTools workers 不改变 prepare 的逐条循环。
 
-数字统计基于最终 float32，图像统计使用选中 RGB 像素通道直方图，重复帧计权，范围归一化到 0–1；这是 H.264 编码前统计。对齐摘要随 `meta/info.json` 的 `tianji` 字段输出，逐行 `alignment.npz` 留在缓存；需要追溯时应保留缓存。
+数字统计基于最终 float32；wrench 的 min/max/mean/std 保留 `[N,12]`，逐窗口位置/分量跨行统计，count 为行数。图像统计使用选中 RGB 像素通道直方图，重复帧计权，范围归一化到 0–1；这是 H.264 编码前统计。对齐摘要随 `meta/info.json` 的 `tianji` 字段输出，逐行 `alignment.npz` 留在缓存；需要追溯时应保留缓存。
 
 ## 与 8095 的配合
 
@@ -239,4 +241,4 @@ Web worker 使用相同配置执行 `check → prepare → convert → deep vali
 python -m pytest -q tianji_provider/tests
 ```
 
-自带测试覆盖命令空流与错开边界、阈值、全路缺口、观测缺失、首尾裁剪、坏命令和旧缓存拒绝。历史实录脚本、旧测试和大体积产物不随仓库分发，位置及验证范围见 [VALIDATION.md](VALIDATION.md)。仅更新文档不会改变 0.5.0 的已安装行为。
+自带测试覆盖命令空流与错开边界、阈值、全路缺口、观测缺失、首尾裁剪、坏命令、旧缓存拒绝，以及多速率网格、无滤波因果取样、窗口内部缺口、嵌套 Parquet 与统计。真实 MCAP 集成测试通过环境变量显式启用，命令见 [验证记录](VALIDATION.md)。历史实录脚本、旧测试和大体积产物不随仓库分发，位置及验证范围见 [VALIDATION.md](VALIDATION.md)。0.6.0 是字段和采样语义变更，需要重装包并从原始 MCAP 重新准备缓存。

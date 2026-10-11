@@ -35,7 +35,7 @@ def fixture():
         signals[topic] = signal([], 7 if "joint_cmd" in topic else 1)
     ranges = {k: [int(v.times[0]), int(v.times[-1]), len(v.times)]
               for k, v in signals.items() if len(v.times)}
-    config = TianjiConfig(task="Pick and place", trim_stationary=False)
+    config = TianjiConfig(task="Pick and place", wrench_fps=50, trim_stationary=False)
     return times, signals, ranges, config
 
 
@@ -80,6 +80,33 @@ def test_no_future_command_and_inclusive_age_boundary():
     np.testing.assert_array_equal(fallback, [True, False, False, True])
     np.testing.assert_array_equal(values[[0, 3]], state[[0, 3]])
     np.testing.assert_array_equal(values[[1, 2]], np.full((2, 2), 99))
+
+
+@pytest.mark.parametrize("topic,columns,max_age_ms", [
+    ("/tj/control/joint_cmd_A", slice(0, 7), 100),
+    ("/tj/control/joint_cmd_B", slice(8, 15), 100),
+    ("/control/gripperValueL", slice(7, 8), 150),
+    ("/control/gripperValueR", slice(15, 16), 150),
+])
+def test_arm_and_gripper_commands_share_state_fallback_at_every_pause(topic, columns, max_age_ms):
+    times, signals, ranges, config = fixture()
+    backup = "/tj/control/joint_cmd_A" if topic == "/tj/control/joint_cmd_B" else "/tj/control/joint_cmd_B"
+    signals[backup] = signal(times, 7, .6)
+    signals[topic] = signal(times[[1, 40]], 7 if "joint_cmd" in topic else 1, .8)
+    # Legacy info targets cannot keep a missing control stream alive.
+    ranges["/info/gripper_target_L"] = [int(times[0]), int(times[-1]), len(times)]
+    ranges["/info/gripper_target_R"] = [int(times[0]), int(times[-1]), len(times)]
+    segments, report = align(signals, ranges, times, config)
+    grid, values, _ = segments[0]
+    state = values["observation.state"][:, columns]
+    action = values["observation.action"][:, columns]
+    fresh = np.zeros(len(times), dtype=bool)
+    for stamp in times[[1, 40]]:
+        fresh |= (grid >= stamp) & (grid <= stamp + max_age_ms * 1_000_000)
+    np.testing.assert_allclose(action[fresh], .8)
+    np.testing.assert_array_equal(action[~fresh], state[~fresh])
+    assert report["command_fallback_frames"][topic] == int(np.sum(~fresh))
+    assert len(report["command_fallback_ranges"][topic]) == 3
 
 
 def test_all_commands_missing_fails():
@@ -151,7 +178,7 @@ def fake_recording(tmp_path, monkeypatch, *, empty_metadata=(), omit=()):
             msg = NS(positions=[.8] * 7)
         elif "gripper_feedback" in topic:
             msg = NS(data=[.4, 0, 0, 0, 0])
-        elif "gripper_target" in topic:
+        elif topic.startswith("/control/gripperValue"):
             msg = NS(data=.5)
         elif "eef" in topic:
             msg = NS(pose=NS(position=NS(x=0, y=0, z=0), orientation=NS(x=0, y=0, z=0, w=1)))

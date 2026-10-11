@@ -10,6 +10,7 @@ from letools.source_providers.base import SourceProvider
 class TianjiConfig:
     task: str
     fps: int = 50
+    wrench_fps: int = 200
     gap_policy: str = "error"
     max_gap_ms: float = 100.0
     command_max_age_ms: float = 100.0
@@ -26,6 +27,10 @@ class TianjiConfig:
         object.__setattr__(self, "task", self.task.strip())
         if type(self.fps) is not int or not 1 <= self.fps <= 1000:
             raise ValueError("--fps must be an integer from 1 to 1000")
+        if type(self.wrench_fps) is not int or not 1 <= self.wrench_fps <= 1000:
+            raise ValueError("--wrench-fps must be an integer from 1 to 1000")
+        if self.wrench_fps < self.fps or self.wrench_fps % self.fps:
+            raise ValueError("--wrench-fps must be >= --fps and an integer multiple of --fps")
         if self.gap_policy != "error":
             raise ValueError("Episodes are never split; --gap-policy must be error for missing observations")
         if any(not 0 < v <= 1000 for v in (self.max_gap_ms, self.command_max_age_ms, self.gripper_max_gap_ms)):
@@ -50,6 +55,8 @@ class TianjiProvider(SourceProvider[TianjiConfig]):
         parser.add_argument("--task", required=task_required, default=None if task_required else "validation",
                             help="Task instruction stored in LeRobot metadata")
         parser.add_argument("--fps", type=int, default=50, help="Output FPS (default: 50)")
+        parser.add_argument("--wrench-fps", type=int, default=200,
+                            help="Unfiltered causal wrench sample rate; integer multiple of FPS, <=1000 (default: 200)")
         parser.add_argument("--gap-policy", choices=("error",), default="error",
                             help="Missing observations fail explicitly; recordings are never split")
         parser.add_argument("--max-gap-ms", type=float, default=100.0,
@@ -58,7 +65,8 @@ class TianjiProvider(SourceProvider[TianjiConfig]):
                             help="Joint command age before using aligned joint feedback (default: 100 ms)")
         parser.add_argument("--gripper-max-gap-ms", type=float, default=150.0,
                             help="Gripper command age before using aligned gripper feedback (default: 150 ms)")
-        parser.add_argument("--state-resampling", choices=("lowpass", "linear"), default="lowpass")
+        parser.add_argument("--state-resampling", choices=("lowpass", "linear"), default="lowpass",
+                            help="Joint/gripper feedback and EEF translation resampling; never filters wrench")
         parser.add_argument("--trim-stationary", action=BooleanOptionalAction, default=True,
                             help="Trim stationary beginning/end only, using joint/gripper feedback (default: enabled)")
         parser.add_argument("--motion-joint-threshold-rad", type=float, default=0.002,
@@ -68,7 +76,7 @@ class TianjiProvider(SourceProvider[TianjiConfig]):
 
     def config_from_args(self, args, context):
         return TianjiConfig(**{key: getattr(args, key) for key in (
-            "task", "fps", "gap_policy", "max_gap_ms", "command_max_age_ms", "gripper_max_gap_ms", "state_resampling",
+            "task", "fps", "wrench_fps", "gap_policy", "max_gap_ms", "command_max_age_ms", "gripper_max_gap_ms", "state_resampling",
             "trim_stationary", "motion_joint_threshold_rad", "motion_gripper_threshold")})
 
     def open(self, source: Path, config: TianjiConfig):

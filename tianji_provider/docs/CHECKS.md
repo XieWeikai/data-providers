@@ -1,4 +1,4 @@
-# 检查、报错与转换拦截（0.5.0）
+# 检查、报错与转换拦截（0.6.0）
 
 [返回使用手册](../README.md) · [参数详解](PARAMETERS.md) · [内部设计](DESIGN.md)
 
@@ -35,7 +35,7 @@ Check 会检查所有可识别录制。每条先分别尝试数值读取和视�
 | 完整视频解码 | 解码失败、帧与消息数量/顺序不匹配、视频尺寸中途改变、宽高不能被 4 整除 | `video_decode_error` / `frame/packet mapping is ambiguous`、`Video dimensions changed` 等 |
 | 跨录制尺寸 | 本批录制的四宫格尺寸不同 | `inconsistent_video_dimensions` / `Expected ..., got ...` |
 | 时间交集 | 无共同候选区间，或候选网格不足两点 | `alignment_error`，也可能有 `timeline_error` / `no common time interval`、`at least two output frames` |
-| 观测缺口 | 超过 max_gap_ms 的反馈间隔影响所需网格点 | `observation_gap` 和通常伴随的 `alignment_error` |
+| 观测缺口 | 超过 max_gap_ms 的观测间隔影响所需网格点；wrench 包括窗口内所有高频点 | `observation_gap` 和通常伴随的 `alignment_error` |
 | 视频过旧 | 输出点距过去最近视频帧超过 max_gap_ms | `video_gap` 和通常伴随的 `alignment_error` |
 | 命令覆盖 | 保留区间存在四路命令同时无效的点 | `command_coverage_gap` 和通常伴随的 `alignment_error` |
 | 四路命令全空 | 完全没有可构建命令覆盖范围的消息 | `alignment_error` / `No recorded control command`，也可能有 `timeline_error`；此时尚无输出网格，不一定产生 command_coverage_gap |
@@ -45,9 +45,11 @@ Check 会检查所有可识别录制。每条先分别尝试数值读取和视�
 
 上表结构、数值、时钟、解码和对齐失败是 error。`observation_gap` / `video_gap` 若超阈值间隔没有影响所需采样点，则为 warning；不是看到 code 中有 gap 就一定失败。
 
+`--wrench-fps` 必须是主 fps 的整数倍且不小于主 fps，两者都在 1–1000；非法配置在逐条检查前以退出码 2 拒绝。默认 50/200 每行包含 4 个力采样，检查不会因不滤波而放宽缺口阈值。
+
 关节与夹爪反馈的“所需”范围包含首尾裁剪前窗口，不能把没测到的首尾当成静止删掉。成功确定输出窗口后，其他观测与视频按保留点判断。对齐先失败时，缺口分析可能使用完整候选网格提供排查信息，应结合 alignment_error 理解范围。
 
-NaN 校验针对被提取到输出中的数值；不是对所有辅助消息的所有字段做通用质量检查。空命令豁免只适用于四路 action 命令，不等于任意名为 control 的 topic 都能豁免。
+NaN 校验针对被提取到输出中的数值；不是对所有辅助消息的所有字段做通用质量检查。夹爪 action 及其空流豁免已改为 `/control/gripperValueL/R`。`/info/gripper_target_L/R` 不作为备用控制源；若仍被录制，和其他辅助 topic 一样检查时钟及范围。空命令豁免只适用于四路 action 命令，不等于任意名为 control 的 topic 都能豁免。
 
 ## 不阻止转换的处理记录
 
@@ -62,6 +64,8 @@ Info 只说明按当前参数计算出的处理，不代表 check 已经写出�
 ## 如何读一条报告
 
 顶层有 `format=tianji-diagnostics-v1`、provider 版本、配置、deep_video、总数、通过数、失败数、valid_frames、总耗时和 results。每条 result 有 bag/path、valid、frames、issues、completed_checks、video、alignment、耗时。
+
+缺口明细的 `affected_frames` 是受影响的主行数，`affected_samples` 是受影响的采样点数；wrench 一行可有多个坏点。`sampling_fps` 为 wrench-fps 或普通字段的 fps，首末受影响时间对于 wrench 是窗口内部的高频时间点。
 
 缺口明细包含 topic、绝对纳秒起止、相对候选起点秒数、实际 gap_ms、阈值、affected_frames、首末受影响输出点及处理方式。命令补齐包含补齐范围/帧数，`last_message_ns=null` 表示此前没有消息，`command_stream_empty=true` 表示该流整段为空。
 
@@ -89,7 +93,7 @@ LeTools 自己另有目标数据集验证，当前 deep validation 检查 episod
 
 ## 常见问题定位
 
-- 单侧没动、整段无命令：0.5.0 可用 state 补齐。仍出现旧的空 A/B 命令错误，应核对实际环境版本与进程，而不是删除录制。
+- 单侧没动、整段无命令：0.6.0 可用 state 补齐。仍出现旧的空 A/B 命令错误，应核对实际环境版本与进程，而不是删除录制。
 - 100.85 ms 夹爪反馈缺口：默认 100 ms 阈值下会失败；改夹爪**命令**阈值无效。命令和观测是两类信号。
 - 全静止轨迹失败：先看是否为运动阈值/裁剪条件，不一定是文件损坏；若需要静止示例可关闭 trim 后重新检查。
 - 一条失败有多项错误：先看结构性读取错误；后续 alignment/timeline 可能尚无法完成，不能据此声称其他数值分支都已验证。

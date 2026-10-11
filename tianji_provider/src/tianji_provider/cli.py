@@ -45,11 +45,12 @@ def main(argv=None):
             from .prepare import prepare as run_prepare
             result = run_prepare(args.source, args.destination, config)
             print(json.dumps({"cache": str(args.destination), "episodes": len(result["episodes"]),
-                              "frames": sum(e["length"] for e in result["episodes"]), "fps": config.fps}, ensure_ascii=False))
+                              "frames": sum(e["length"] for e in result["episodes"]), "fps": config.fps,
+                              "wrench_fps": config.wrench_fps}, ensure_ascii=False))
         else:
             from .source import TianjiSource
             source = TianjiSource(args.source, config, _collect_image_stats=False)
-            result = {"fps": config.fps, "episodes": len(source.episodes), "frames": source.metadata.total_frames, "reports": source.reports}
+            result = {"fps": config.fps, "wrench_fps": config.wrench_fps, "episodes": len(source.episodes), "frames": source.metadata.total_frames, "reports": source.reports}
             if args.report:
                 args.report.parent.mkdir(parents=True, exist_ok=True)
                 args.report.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")

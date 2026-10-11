@@ -1,4 +1,4 @@
-# 内部设计（0.5.0）
+# 内部设计（0.6.0）
 
 [返回使用手册](../README.md) · [参数详解](PARAMETERS.md) · [检查与报错](CHECKS.md)
 
@@ -65,7 +65,8 @@ tianji = "tianji_provider.provider:provider"
 | [prepare.py](../src/tianji_provider/prepare.py) | 缓存写入、H.264 编码、完成清单、复用判断 | 把有副作用的准备操作与只读 source 分开 |
 | [cli.py](../src/tianji_provider/cli.py) | check/inspect/prepare 子命令、报告与退出码 | 提供辅助工具，不承担目标 LeRobot 后端职责 |
 | [__init__.py](../src/tianji_provider/__init__.py) | 包版本和 LeTools 导入引导 | 避免入口发现与直接导入 provider 子模块时的初始化顺序问题 |
-| [tests/test_command_coverage.py](../tests/test_command_coverage.py) | 命令覆盖、缺口、裁剪与缓存版本回归 | 固定 0.5.0 的边界行为 |
+| [tests/test_wrench_windows.py](../tests/test_wrench_windows.py) / [test_recording_integration.py](../tests/test_recording_integration.py) | 高频力窗口和可选真实录制端到端验收 | 验证源样本、时间网格、缓存和两个 LeRobot 后端 |
+| [tests/test_command_coverage.py](../tests/test_command_coverage.py) | 命令覆盖、缺口、裁剪与缓存版本回归 | 固定 0.6.0 的边界行为 |
 
 普通 source 用 metadata 识别录制，check 则额外识别 `my_bag-*` 或含 data/video 的不完整目录，使错误可见；两者都不静默修复文件。Metadata 引用路径必须存在且位于相应 bag 目录内，MCAP 按清单顺序读取，避免文件名排序打乱分片。
 
@@ -91,7 +92,9 @@ tianji = "tianji_provider.provider:provider"
 
 ### 2. 用纳秒生成规则网格
 
-每点独立计算 `T0 + round(k × 1e9 / fps)`，内部为 int64 纳秒，最后一个点不超过 T1。实现使用整数最近舍入（半值向上），不依赖浮点大 epoch，也不累计加一个近似周期。至少需要两个点。
+先验证 `wrench_fps >= fps` 且 `wrench_fps % fps == 0`，令 N=wrench_fps/fps。建立唯一高频网格 `H[k] = T0 + round(k × 1e9 / wrench_fps)`，内部为 int64 纳秒。每 N 点组成一个完整窗口，主帧 `G[i]=H[i*N+N-1]`；不足 N 点的尾部不补齐，至少要有两行。所有取样都在候选交集内。
+
+整数最近舍入（半值向上）避免 epoch 浮点误差和累计漂移；主帧及窗口从同一高频网格派生，非整纳秒周期的舍入误差最多 1 ns。默认首行锚点为 T0+15 ms；相对时间仍从该锚点记为 0。
 
 ### 3. 验证观测支撑并重采样反馈
 
@@ -103,7 +106,7 @@ tianji = "tianji_provider.provider:provider"
 
 用已对齐的 14 维关节与两路夹爪反馈；首尾各 200 ms 中位数作为端点姿态。任一关节/夹爪对端点的绝对偏移超过相应阈值即算运动，保留边界外一个样本。只截两端，中途暂停和网格连续性保留。全静止或不足两点在开启裁剪时失败。
 
-其他观测与视频的所需有效性在保留窗口检查。EEF 平移和 wrench 按配置重采样；EEF 旋转先检查单位四元数，再使用最短路径 SLERP，并统一输出四元数符号连续性。
+其他观测与视频的所需有效性在保留窗口检查。EEF 平移按 state-resampling 重采样；wrench 对每个保留窗口的每个高频点单独验证缺口，再向过去查找真实样本，完全绕过 interpolate/FIR。每侧独立查找，输出 `[行数,N,12]`，不使用另一侧的索引。EEF 旋转先检查单位四元数，再使用最短路径 SLERP，并统一输出四元数符号连续性。
 
 ### 5. 为四路 action 赋值
 
@@ -123,7 +126,9 @@ tianji = "tianji_provider.provider:provider"
 
 四路相机使用同一个过去帧索引；30→50 FPS 重复画面，不做运动插帧。所有数值列转为 float32，再计算统计；索引列为 int64，输出相对时间从零开始。一个 bag 只产生一个 episode，`dropped_frames=0`，`grid_frames=kept_frames+trimmed_frames`。
 
-Report 记录候选边界、裁剪前后帧数、trim 窗口、每路无效帧、命令补齐数与范围、空命令 topic、最少有效命令路数、信号起止范围和最大视频年龄。Source 再加入原始 bag、时钟来源、夹爪标定和 episode 映射。Audit 保存每一输出点的绝对时间、原视频包索引及视频时间。
+Report 记录候选边界、裁剪前后帧数、trim 窗口、每路无效帧、命令补齐数与范围、空命令 topic、最少有效命令路数、信号起止范围和最大视频年龄。Source 再加入原始 bag、时钟来源、夹爪标定和 episode 映射。Audit 保存每一输出点的绝对时间、原视频包索引及视频时间，以及 `[行数,N]` 的 wrench 网格时间、`[行数,N,2]` 的左右实际 wrench 源消息时间。Report 另存高频网格起点、裁剪前窗口索引、采样策略、频率、每行样本数及最大测量年龄。
+
+`observation.wrench_windows` 的 Arrow 类型是嵌套 fixed-size list，两个列表轴对应 N 和 12，不能展平成 N*12。统计沿行轴聚合，结果形状 `[N,12]`、count 为行数。Features 的 `sampling_rate_hz` 标识内部频率，`sample_offsets_seconds` 标识相对主帧偏移，`component_names` 标识 12 个力分量；不把外层行 FPS 冒充为内部频率。字段 `names=null`，避免把 12 个标签误当成 N 维外轴名称。
 
 ## 两种媒体路径
 
@@ -138,7 +143,7 @@ Prepare 写数值和审计后编码，清单最后写入；它是完成标识，
 
 ## 缓存、计划和版本
 
-三个版本概念独立：包版本 `0.5.0`、provider API `2`、缓存格式 `tianji-thor-v3`；目标可以是 LeRobot v2.1 或 v3.0。
+三个版本概念独立：包版本 `0.6.0`、provider API `2`、缓存格式 `tianji-thor-v4`；目标可以是 LeRobot v2.1 或 v3.0。
 
 缓存复用比较格式、完整配置（排除 task）和源文件指纹。指纹记录 MCAP 的路径、大小、mtime，不是内容校验和；直接打开缓存只验证格式/配置和资源，不重新读取原始 MCAP。Planner identity 则包含实现格式标识与全部配置哈希，作用于转换计划身份；不能代替缓存/源文件校验。
 
