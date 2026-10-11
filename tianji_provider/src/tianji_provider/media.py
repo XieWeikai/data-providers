@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 
 import av
+import cv2
 import numpy as np
 from letools.model import FrameSequence
 
@@ -66,8 +67,21 @@ class RGBStatistics:
         self.frames = 0
 
     def add(self, image, weight=1):
-        for channel in range(3):
-            self.histogram[channel] += weight * np.bincount(image[:, :, channel].reshape(-1), minlength=256)
+        """Count uint8 RGB pixels exactly, including repeated frame weights."""
+        if image.dtype != np.uint8:
+            raise TypeError("RGB statistics require a uint8 image")
+        if image.ndim != 3 or image.shape[2] != 3 or min(image.shape[:2]) == 0:
+            raise ValueError("RGB statistics require a nonempty H x W x 3 image")
+        # calcHist returns float32. Every count is exactly representable only
+        # while a single frame has at most 2**24 pixels. Convert to int64 before
+        # weighting or accumulating; use integer bincount above that bound.
+        if image.shape[0] * image.shape[1] <= 2**24:
+            for channel in range(3):
+                counts = cv2.calcHist([image], [channel], None, [256], [0, 256]).reshape(256)
+                self.histogram[channel] += weight * counts.astype(np.int64)
+        else:
+            for channel in range(3):
+                self.histogram[channel] += weight * np.bincount(image[:, :, channel].reshape(-1), minlength=256)
         self.frames += weight
 
     def result(self):
