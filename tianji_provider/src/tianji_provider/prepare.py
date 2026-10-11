@@ -70,7 +70,7 @@ def prepare(root, destination, config, *, workers=None):
     if destination.exists():
         raise FileExistsError(f"Refusing to overwrite an existing/incomplete cache: {destination}")
     alignment_started = time.perf_counter()
-    source = TianjiSource(root, config, _collect_image_stats=False)
+    source = TianjiSource(root, config, _collect_image_stats=False, _workers=workers)
     episodes = source.episodes
     alignment_seconds = time.perf_counter() - alignment_started
     destination.mkdir(parents=True)

@@ -50,7 +50,7 @@ tianji = "tianji_provider.provider:provider"
 | `planner_identity()` | 当前格式、媒体实现标识及配置哈希；用于区分计划语义，不是源文件完整性哈希 |
 | `reports` / `audit()` | Tianji 的扩展审计接口，不是所有 provider 都必须提供 |
 
-首次访问 metadata/episodes 等属性触发 `_loaded`，结果由 `cached_property` 保留。原始源在这次加载中整理全部轨迹低维表格；缓存源读取清单并建立描述符，表格按 episode 从 Parquet 读取。
+首次访问 metadata/episodes 等属性触发 `_loaded`，结果由 `cached_property` 保留。原始源按 bag 有界并行读取/对齐，仅将保留的数组、时间审计和小型报告传回父进程，不传原始高频 signals 或 codec。父进程按原始排序生成 episode/global index、Arrow 表和统计，并保持先检查尺寸再报告该 bag 对齐错误的顺序。图像统计仍在父进程执行。缓存源读取清单并建立描述符，表格按 episode 从 Parquet 读取。
 
 ## 模块分工与数据生命周期
 
@@ -143,7 +143,7 @@ Report 记录候选边界、裁剪前后帧数、trim 窗口、每路无效帧�
 
 PPM 避免旧 JPEG 中间帧先损失细节，代价是较大的批次内存。随机读取 FrameSequence 会建立新的顺序解码过程，不代表 MP4 任意位置 O(1) 读取。Prepare 每个 worker 用一个解码器同时裁出四路，流式编码与计算 RGB 通道直方图；重复帧复用裁分画面并按重复次数计入统计。
 
-Prepare 数值 source 加载及表格/审计写入仍在父进程，视频按 bag 有界并行。任务只传本条视频路径、尺寸、输出路径及帧索引，不 pickle 完整 DataSource。子进程返回图像统计和耗时，父进程按原录制顺序合并清单。只有所有视频任务成功后才写清单；异常会终止并 join 池中其余任务。子进程继承调用方进程组，Web 的进程组取消可覆盖完整树。`workers` 不进入 TianjiConfig 或缓存身份。
+Prepare 的数值 source 按 bag 并行读取/对齐，表格/审计写入在父进程，视频随后按 bag 有界并行。两阶段复用同一 workers 选择，不同时创建两套池。视频任务只传本条路径、尺寸、输出路径及帧索引，不 pickle 完整 DataSource。子进程返回图像统计和耗时，父进程按原录制顺序合并清单。只有所有视频任务成功后才写清单；异常会终止并 join 池中其余任务。子进程继承调用方进程组，Web 的进程组取消可覆盖完整树。`workers` 不进入 TianjiConfig 或缓存身份。
 
 Prepare 写数值和审计后编码，清单最后写入；它是完成标识，但整个 prepare 目录写入并非平台式原子发布。失败会留下未完成目录，不会被当成有效缓存。转换输出由 LeTools 管理，8095 在此之上还加自己的暂存/深度验证/发布阶段。
 

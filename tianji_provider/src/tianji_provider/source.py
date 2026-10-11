@@ -1,5 +1,6 @@
 """Read-only DatasetSource: raw MCAP or an explicitly prepared reusable cache."""
 
+from contextlib import closing
 from dataclasses import asdict
 from functools import cached_property
 from pathlib import Path
@@ -13,6 +14,7 @@ from letools.model import DatasetMetadata, Episode, EpisodeDataProfile, MediaPro
 from letools.plugins.base import DatasetSource
 
 from .alignment import WRENCH_TOPICS, align, output_grids, previous_indices
+from .execution import iter_parallel
 from .media import CAMERAS, TianjiFrames, dimensions, image_statistics
 from .reader import bag_files, discover, read_numeric, read_video_times, video_files
 
@@ -62,13 +64,53 @@ def features(width, height, fps, codec="ppm", *, wrench_fps=200):
     return result
 
 
+def _load_numeric_recording(job):
+    """Read/align one bag, returning only retained arrays and their audit times.
+
+    Errors travel with the partial result so the parent can preserve sorted
+    recording order and the existing dimension-check-before-alignment rule.
+    High-rate source signals and codecs stay within this worker.
+    """
+    bag, config = job
+    result = {"bag": bag, "size": None, "error": None}
+    try:
+        signals, ranges, clocks, calibration = read_numeric(bag)
+        paths = video_files(bag)
+        vt = read_video_times(paths)
+        result.update(paths=paths, size=dimensions(paths))
+        try:
+            segments, report = align(signals, ranges, vt, config)
+        except ValueError as error:
+            raise ValueError(f"{bag.name}: {error}") from error
+        report.update(bag=str(bag), timestamp_sources=clocks, gripper_calibration=calibration)
+        physical = sum(p.stat().st_size for p in bag_files(bag / "data"))
+        result.update(report=report, video_bytes=sum(p.stat().st_size for p in paths))
+        retained = []
+        for grid, values, indices in segments:
+            length = len(grid)
+            _, windows = output_grids(report["intersection_start_ns"], report["intersection_end_ns"], config)
+            first = report["wrench_sampling"]["first_window_index"]
+            windows = windows[first:first + length]
+            audit = {"bag": str(bag), "absolute_time_ns": grid, "video_packet_index": indices,
+                     "video_time_ns": vt[indices], "data_physical_bytes": physical,
+                     "wrench_time_ns": windows, "wrench_sample_time_ns": np.stack([
+                         signals[key].times[previous_indices(signals[key].times, windows.ravel())].reshape(windows.shape)
+                         for key in WRENCH_TOPICS], axis=2)}
+            retained.append((values, audit))
+        result["segments"] = retained
+    except Exception as error:
+        result["error"] = error
+    return result
+
+
 class TianjiSource(DatasetSource):
     """Construction is lazy; provider.open does no traversal, decoding or writing."""
 
-    def __init__(self, root, config, *, _collect_image_stats=True):
+    def __init__(self, root, config, *, _collect_image_stats=True, _workers=None):
         self.root = Path(root).expanduser().resolve()
         self.config = config
         self._collect_image_stats = _collect_image_stats
+        self._workers = _workers
 
     def planner_identity(self):
         return FORMAT + ":ppm-rgb24-v1", hashlib.sha256(json.dumps(asdict(self.config), sort_keys=True).encode()).hexdigest()
@@ -79,46 +121,40 @@ class TianjiSource(DatasetSource):
             return self._load_prepared()
         rows, descriptors, reports, audit = {}, [], [], {}
         offset, expected_size = 0, None
-        for bag in discover(self.root):
-            signals, ranges, clocks, calibration = read_numeric(bag)
-            paths = video_files(bag)
-            vt = read_video_times(paths)
-            size = dimensions(paths)
-            if expected_size is not None and size != expected_size:
-                raise ValueError("Camera dimensions vary across recordings")
-            expected_size = size
-            try:
-                segments, report = align(signals, ranges, vt, self.config)
-            except ValueError as error:
-                raise ValueError(f"{bag.name}: {error}") from error
-            report.update(bag=str(bag), timestamp_sources=clocks, gripper_calibration=calibration)
-            report["episode_indices"] = list(range(len(descriptors), len(descriptors)+len(segments)))
-            reports.append(report)
-            physical = sum(p.stat().st_size for p in bag_files(bag / "data"))
-            video_bytes = sum(p.stat().st_size for p in paths)
-            for grid, values, indices in segments:
-                index, length = len(descriptors), len(grid)
-                values.update(timestamp=np.arange(length, dtype=np.float32) / self.config.fps,
-                              frame_index=np.arange(length, dtype=np.int64), episode_index=np.full(length, index, dtype=np.int64),
-                              index=np.arange(offset, offset+length, dtype=np.int64), task_index=np.zeros(length, dtype=np.int64))
-                table = arrow_table(values)
-                rows[index] = table
-                media = {f"observation.image.{name}": TianjiFrames(paths, indices, name, *size, video_bytes) for name in CAMERAS}
-                descriptors.append(Episode(index, length, (self.config.task,), {k: statistics(v) for k, v in values.items()}, bag, data_end=length, videos=media))
-                audit[index] = {"bag": str(bag), "absolute_time_ns": grid, "video_packet_index": indices,
-                                "video_time_ns": vt[indices], "data_physical_bytes": physical}
-                _, windows = output_grids(report["intersection_start_ns"], report["intersection_end_ns"], self.config)
-                first = report["wrench_sampling"]["first_window_index"]
-                windows = windows[first:first + length]
-                audit[index].update(wrench_time_ns=windows, wrench_sample_time_ns=np.stack([
-                    signals[k].times[previous_indices(signals[k].times, windows.ravel())].reshape(windows.shape)
-                    for k in WRENCH_TOPICS], axis=2))
-                offset += length
-            if self._collect_image_stats:
-                group = [e for e in descriptors if e.data_path == bag]
-                image_stats = image_statistics(group)
-                for ep in group:
-                    ep.stats.update(image_stats[ep.index])
+        jobs = [(bag, self.config) for bag in discover(self.root)]
+        ready, next_recording = {}, 0
+        with closing(iter_parallel(_load_numeric_recording, jobs, workers=self._workers)) as loaded:
+            for recording_index, result in loaded:
+                ready[recording_index] = result
+                while next_recording in ready:
+                    result = ready.pop(next_recording)
+                    next_recording += 1
+                    bag, size = result["bag"], result["size"]
+                    if size is not None and expected_size is not None and size != expected_size:
+                        raise ValueError("Camera dimensions vary across recordings")
+                    if result["error"] is not None:
+                        raise result["error"]
+                    expected_size = size
+                    paths, video_bytes = result["paths"], result["video_bytes"]
+                    segments, report = result["segments"], result["report"]
+                    report["episode_indices"] = list(range(len(descriptors), len(descriptors)+len(segments)))
+                    reports.append(report)
+                    for values, item_audit in segments:
+                        indices = item_audit["video_packet_index"]
+                        index, length = len(descriptors), len(item_audit["absolute_time_ns"])
+                        values.update(timestamp=np.arange(length, dtype=np.float32) / self.config.fps,
+                                      frame_index=np.arange(length, dtype=np.int64), episode_index=np.full(length, index, dtype=np.int64),
+                                      index=np.arange(offset, offset+length, dtype=np.int64), task_index=np.zeros(length, dtype=np.int64))
+                        rows[index] = arrow_table(values)
+                        media = {f"observation.image.{name}": TianjiFrames(paths, indices, name, *size, video_bytes) for name in CAMERAS}
+                        descriptors.append(Episode(index, length, (self.config.task,), {k: statistics(v) for k, v in values.items()}, bag, data_end=length, videos=media))
+                        audit[index] = item_audit
+                        offset += length
+                    if self._collect_image_stats:
+                        group = [e for e in descriptors if e.data_path == bag]
+                        image_stats = image_statistics(group)
+                        for ep in group:
+                            ep.stats.update(image_stats[ep.index])
         assert expected_size is not None
         return self._finish(descriptors, rows, reports, audit,
                             features(*expected_size, self.config.fps, wrench_fps=self.config.wrench_fps))

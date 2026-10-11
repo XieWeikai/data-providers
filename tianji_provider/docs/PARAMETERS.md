@@ -127,7 +127,7 @@ CLI 不接受 `29.97` 这类非整数。时间交集或裁剪后的区间至少�
 
 | 参数 | 适用命令 | 默认 | 意义和边界 |
 |---|---|---|---|
-| `--workers N` | check、prepare | 自动：最多 8，且可用 CPU 数减 2，最低 1 | 正整数，实际不超过录制数；1 为串行。check 并行完整轨迹检查，prepare 并行视频阶段。执行参数不影响字段、质量或缓存身份 |
+| `--workers N` | check、prepare | 自动：最多 8，且可用 CPU 数减 2，最低 1 | 正整数，实际不超过录制数；1 为串行。check 并行完整轨迹检查，prepare 数值加载和视频分别按轨迹并行。执行参数不影响字段、质量或缓存身份 |
 | `--report PATH` | check、inspect | 不写文件 | 将完整 JSON 写入该文件，必要时创建父目录；同名文件会被重写，建议使用独立报告路径，不能指向原始数据文件 |
 | `--deep-video` | check | 开启 | 完整解码视频，验证所有帧映射、数量、顺序与尺寸；不编码输出 |
 | `--no-deep-video` | check | 不启用此快速模式 | 仍读取全部视频消息时间戳/结构，但只解码首帧检查尺寸，不能排除后续坏帧 |
@@ -139,7 +139,9 @@ CLI 不接受 `29.97` 这类非整数。时间交集或裁剪后的区间至少�
 
 `TianjiConfig.preset` 默认且只允许 `thor-v1`，定义已验证的 topic/坐标系/字段契约。**当前 CLI 没有 `--preset` 参数**，也没有任意 topic 名称映射开关。不能通过换一个字符串适配另一种机器人。
 
-`TianjiSource(..., _collect_image_stats=False)` 是内部控制选项，供 inspect 和 prepare 延后/省略图像统计使用；不是公共 CLI 调参入口。`prepare(..., workers=None)` 与 `check_dataset(..., workers=None)` 可控制录制并发；check 的 `deep_video` 控制解码范围，`progress` 在父进程按稳定顺序回调。多进程采用 spawn，脚本调用必须放在 `if __name__ == '__main__':` 保护下；交互环境可显式 workers=1。这些都不是输出信号参数。
+`TianjiSource(..., _collect_image_stats=False)` 是内部控制选项，供 inspect 和 prepare 延后/省略图像统计使用；不是公共 CLI 调参入口。`prepare(..., workers=None)` 与 `check_dataset(..., workers=None)` 可控制录制并发；check 的 `deep_video` 控制解码范围，`progress` 在父进程按稳定顺序回调。原始 `TianjiSource` 的首次 metadata/episodes 访问也默认并行，内部 `_workers=1` 可用于串行对照或受限交互环境；provider.open 返回 source 仍然不立即读取或启动进程。缓存 source 不启动原始读取池。
+
+多进程采用 spawn，直接 Python 调用 check/prepare 或首次加载原始 DataSource 的脚本都必须放在 `if __name__ == '__main__':` 保护下；交互环境可显式 workers=1 或 `TianjiSource(..., _workers=1)`。这些都不是输出信号参数，也不改变缓存身份。
 
 ## 常见 LeTools 参数：不属于 Tianji provider
 
