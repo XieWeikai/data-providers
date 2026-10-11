@@ -1,6 +1,6 @@
 # Tianji provider for LeTools
 
-本文描述 **tianji-provider 0.6.0**：读取 Thor / Tianji / Marvin Pro 的 ROS 2 MCAP 录制，将机器人信号和四路画面对齐，向 LeTools 提供 `DatasetSource`，由 LeTools 输出 LeRobot v2.1 / v3.0。Provider 不连接或控制机器人，读取源数据不需要 ROS 运行环境。
+本文描述 **tianji-provider 0.6.1**：读取 Thor / Tianji / Marvin Pro 的 ROS 2 MCAP 录制，将机器人信号和四路画面对齐，向 LeTools 提供 `DatasetSource`，由 LeTools 输出 LeRobot v2.1 / v3.0。Provider 不连接或控制机器人，读取源数据不需要 ROS 运行环境。0.6.1 为性能优化版本，保持 0.6.0 的数值、检查、统计和编码语义，缓存格式仍为 tianji-thor-v4。
 
 | 文档 | 内容 |
 |---|---|
@@ -66,7 +66,7 @@ uv pip install --python "$TIANJI_ENV/bin/python" \
   'import tianji_provider; print(tianji_provider.__version__, tianji_provider.__file__)'
 ```
 
-新环境应先按 data-web-platform 部署说明安装完整 LeTools/native 依赖；不要为更新 provider 重建使用中的 `.venv`。依赖已满足且只需重装当前包时可加 `--no-deps`，它不能代替首次依赖安装。确认发现的 `tianji` 版本为 0.6.0、模块路径为预期仓库；不要复制其他全局环境的 provider 配置进来。
+新环境应先按 data-web-platform 部署说明安装完整 LeTools/native 依赖；不要为更新 provider 重建使用中的 `.venv`。**从 0.6.0 升级时新增了 opencv-python-headless，并要求 mcap-ros2-support>=0.5.7,<0.6；首次升级不要直接使用 --no-deps 跳过依赖。** 全部依赖已满足且只需重装当前包时才可加 `--no-deps`。确认发现的 `tianji` 版本为 0.6.1、模块路径为预期仓库；不要复制其他全局环境的 provider 配置进来。
 
 Web 服务在启动时发现 providers。更新后确认无运行/排队任务，再重启并读取实际环境：
 
@@ -214,7 +214,7 @@ cache/
 
 Prepare 在视频编码/统计阶段每条四宫格完整解码一次，同时编码四路；完成选中帧后仍继续解码尾部检查映射。对齐阶段另读时间戳和首帧。如果前面执行 deep check，那是额外一次完整解码，不能把 check+prepare 全流程称为只解码一次。
 
-数值 MCAP 在一次原始 source 加载中每条读取一次，check 和后续 prepare 是不同加载。原始 source 保留全部已对齐低维表格与审计数组，内存随总帧数增长；RGB 图像流式处理。Prepare 默认按录制有界并行，最多 8 个进程且按可用 CPU 留出两个核；每个进程一个解码器、四个单线程编码器。`tianji-provider prepare/check --workers 1` 可串行运行；该选项不改变缓存语义，与 LeTools 的 workers 不同。
+数值 MCAP 在一次原始 source 加载中每条读取一次，check 和后续 prepare 是不同加载。原始 source 保留全部已对齐低维表格与审计数组，内存随总帧数增长；RGB 图像流式处理。Prepare 数值加载和视频阶段分别按录制有界并行，默认进程数为 `min(8,max(1,可用CPU数-2),录制数)`；这是数量上限，不是 CPU 绑定或保证两核空闲。视频阶段每个 worker 一个解码器、四个单线程编码器。`tianji-provider prepare/check --workers 1` 可串行运行；该选项不改变缓存语义，与 LeTools 的 workers 不同。
 
 数字统计基于最终 float32；wrench 的 min/max/mean/std 保留 `[N,12]`，逐窗口位置/分量跨行统计，count 为行数。图像统计使用选中 RGB 像素通道直方图，重复帧计权，范围归一化到 0–1；这是 H.264 编码前统计。对齐摘要随 `meta/info.json` 的 `tianji` 字段输出，逐行 `alignment.npz` 留在缓存；需要追溯时应保留缓存。
 
@@ -244,4 +244,4 @@ Web worker 使用相同配置执行 `check → prepare → convert → deep vali
 python -m pytest -q tianji_provider/tests
 ```
 
-自带测试覆盖命令空流与错开边界、阈值、全路缺口、观测缺失、首尾裁剪、坏命令、旧缓存拒绝，以及多速率网格、无滤波因果取样、窗口内部缺口、嵌套 Parquet 与统计。真实 MCAP 集成测试通过环境变量显式启用，命令见 [验证记录](VALIDATION.md)。历史实录脚本、旧测试和大体积产物不随仓库分发，位置及验证范围见 [VALIDATION.md](VALIDATION.md)。0.6.0 是字段和采样语义变更，需要重装包并从原始 MCAP 重新准备缓存。
+自带测试覆盖命令空流与错开边界、阈值、全路缺口、观测缺失、首尾裁剪、坏命令、旧缓存拒绝，以及多速率网格、无滤波因果取样、窗口内部缺口、嵌套 Parquet、编译解码差分、并行顺序/取消/崩溃与精确像素统计。真实 MCAP 集成测试通过环境变量显式启用，命令见 [验证记录](VALIDATION.md)。历史脚本、旧测试和大体积产物不随仓库分发。0.6.0 曾改变字段和采样语义；0.6.1 不再改变语义，满足同配置/源指纹条件的 v4 缓存可以继续复用。

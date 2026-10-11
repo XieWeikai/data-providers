@@ -1,4 +1,4 @@
-# 参数详解（0.6.0）
+# 参数详解（0.6.1）
 
 [返回使用手册](../README.md) · [内部设计](DESIGN.md) · [检查与报错](CHECKS.md)
 
@@ -151,7 +151,7 @@ CLI 不接受 `29.97` 这类非整数。时间交集或裁剪后的区间至少�
 |---|---|---|
 | `--source-format tianji` | 选择插件，默认 auto 不能代替显式原始源选择 | 让 LeTools 注入 Tianji 参数并构造 TianjiSource；辅助 CLI 不需要此选项 |
 | `--to v2.1` / `--to v3.0` | 必填，选择目标布局；CLI 也接受 `2.1` / `3.0` | 不改变对齐算法；同一缓存可分别输出两个版本 |
-| `--workers N` | LeTools 数据写入并发 | 不加速之前独立执行的 check/prepare；平台默认 2 |
+| `--workers N` | LeTools 数据写入并发 | 不控制 provider check/prepare 或原始 DataSource 的内部自动并发；平台默认 2 |
 | `--video-workers N` | LeTools 媒体任务并发 | 不改变 prepare 固定编码设置或单条循环；平台默认 4 |
 | `--video-codec libx264` | 对 FrameSequence 编码为 H.264 | 直接路径适用；prepare 自己已固定 libx264，缓存不是 MP4 转码输入 |
 | `--video-pixel-format yuv420p` | 指定帧编码像素格式 | 与上一项配合，直接路径适用；不能通过标签修改缓存码流 |
@@ -174,6 +174,7 @@ LeTools workers 未显式指定时由其当前版本默认值决定，与网页�
 | 改 check/prepare workers | 可以，不改变数据语义和缓存配置 |
 | 改 report 路径或 check 深度 | 不影响缓存配置，但诊断覆盖范围不同 |
 | 改目标 v2.1/v3.0、LeTools workers | 可以，不改变 provider 时间语义 |
-| 旧 tianji-thor-v1/v2/v3 缓存换成 0.6.0 打开 | 不可以，必须重建为 tianji-thor-v4 |
+| 旧 tianji-thor-v1/v2/v3 缓存换成 0.6.1 打开 | 不可以，必须重建为 tianji-thor-v4 |
+| 0.6.0 的 tianji-thor-v4 缓存换成 0.6.1 打开 | 同配置及资源有效时可以，性能优化未改变内容语义 |
 
 参数改变不自动修复或删除数据。任何新策略都应先重新 check，再以相同配置 prepare/convert；不要仅根据旧报告决定新参数的转换是否可靠。

@@ -1,4 +1,4 @@
-# 高频 wrench 窗口（0.6.0）
+# 高频 wrench 窗口（0.6.1，沿用 0.6.0 语义）
 
 [使用手册](../README.md) · [全部参数](PARAMETERS.md) · [实现设计](DESIGN.md)
 
