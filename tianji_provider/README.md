@@ -214,11 +214,13 @@ cache/
 
 Prepare 在视频编码/统计阶段每条四宫格完整解码一次，同时编码四路；完成选中帧后仍继续解码尾部检查映射。对齐阶段另读时间戳和首帧。如果前面执行 deep check，那是额外一次完整解码，不能把 check+prepare 全流程称为只解码一次。
 
-数值 MCAP 在一次原始 source 加载中每条读取一次，check 和后续 prepare 是不同加载。原始 source 保留全部已对齐低维表格与审计数组，内存随总帧数增长；RGB 图像流式处理。Prepare 最多一个解码器、四个编码器，各编码器一线程；LeTools workers 不改变 prepare 的逐条循环。
+数值 MCAP 在一次原始 source 加载中每条读取一次，check 和后续 prepare 是不同加载。原始 source 保留全部已对齐低维表格与审计数组，内存随总帧数增长；RGB 图像流式处理。Prepare 默认按录制有界并行，最多 8 个进程且按可用 CPU 留出两个核；每个进程一个解码器、四个单线程编码器。`tianji-provider prepare/check --workers 1` 可串行运行；该选项不改变缓存语义，与 LeTools 的 workers 不同。
 
 数字统计基于最终 float32；wrench 的 min/max/mean/std 保留 `[N,12]`，逐窗口位置/分量跨行统计，count 为行数。图像统计使用选中 RGB 像素通道直方图，重复帧计权，范围归一化到 0–1；这是 H.264 编码前统计。对齐摘要随 `meta/info.json` 的 `tianji` 字段输出，逐行 `alignment.npz` 留在缓存；需要追溯时应保留缓存。
 
 ## 与 8095 的配合
+
+Check 默认按录制并行，但逐条结果、跨录制尺寸校验和进度回调保持稳定目录顺序。新并发参数及 Python 调用要求见 [参数详解](docs/PARAMETERS.md)。
 
 Web worker 使用相同配置执行 `check → prepare → convert → deep validation → publish`。网页“仅检查”在 check 后返回，不编码输出。
 

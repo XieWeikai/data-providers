@@ -1,6 +1,7 @@
 """Explicit cache writer, separate from the read-only source/provider boundary."""
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
+from contextlib import closing
 from pathlib import Path
 from fractions import Fraction
 import json
@@ -13,8 +14,27 @@ import pyarrow.parquet as pq
 from .media import CAMERAS, RGBStatistics, crop, decode_quad
 from .reader import bag_files, discover, video_files
 from .source import FORMAT, TianjiSource, features
+from .execution import iter_parallel, worker_count
 
 H264_OPTIONS = {"preset": "veryfast", "crf": "18", "bf": "0"}
+
+
+@dataclass(frozen=True)
+class VideoEpisode:
+    index: int
+    length: int
+    indices: np.ndarray
+    videos: dict
+
+
+@dataclass(frozen=True)
+class VideoJob:
+    bag: str
+    paths: tuple
+    width: int
+    height: int
+    fps: int
+    episodes: tuple
 
 
 def fingerprint(root):
@@ -26,13 +46,14 @@ def fingerprint(root):
     return result
 
 
-def prepare(root, destination, config):
+def prepare(root, destination, config, *, workers=None):
     """Decode each raw quad stream once for all segments and all four cameras.
 
     The manifest is written last. An interrupted cache cannot be opened as a
     valid source, and an existing directory is never overwritten automatically.
     """
     root, destination = Path(root).resolve(), Path(destination).resolve()
+    worker_count(workers, 0)  # Validate execution options even on a cache hit.
     if destination == root or destination.is_relative_to(root):
         raise ValueError("The cache must be outside the raw recording directory")
     options = asdict(config)
@@ -69,16 +90,26 @@ def prepare(root, destination, config):
                         "videos": {f"observation.image.{c}": str((folder / f"{c}.mp4").relative_to(destination)) for c in CAMERAS}})
     tables_seconds = time.perf_counter() - started
     video_started = time.perf_counter()
-    recordings = []
+    jobs = []
     for bag in discover(root):
         group = [ep for ep in episodes if ep.data_path == bag]
-        frames = sum(e.length for e in group)
-        print(f"Encoding {bag.name}: {len(group)} episodes, {frames} frames", flush=True)
-        bag_started = time.perf_counter()
-        _encode_group(source, group, destination, entries)
-        elapsed = time.perf_counter() - bag_started
-        recordings.append({"bag": bag.name, "frames": frames, "video_seconds": elapsed})
-        print(f"Encoded {bag.name}: {elapsed:.2f} s, {frames / elapsed:.2f} dataset frames/s", flush=True)
+        first = group[0].videos["observation.image.head_left"]
+        # Send only this recording's paths and indices. Pickling source would
+        # copy the entire batch of numeric tables/audits into every worker.
+        jobs.append(VideoJob(bag.name, first.paths, first.width, first.height, config.fps,
+            tuple(VideoEpisode(ep.index, ep.length, source.audit(ep)["video_packet_index"],
+                               {key: destination / value for key, value in entries[ep.index]["videos"].items()})
+                  for ep in group)))
+    recordings = [None] * len(jobs)
+    video_workers = worker_count(workers, len(jobs))
+    with closing(iter_parallel(_encode_group, jobs, workers=workers)) as completed:
+        for job_index, result in completed:
+            recording, image_stats = result
+            recordings[job_index] = recording
+            for ep_index, stats in image_stats.items():
+                entries[ep_index]["stats"].update(stats)
+            print(f"Encoded {recording['bag']}: {recording['video_seconds']:.2f} s, "
+                  f"{recording['frames'] / recording['video_seconds']:.2f} dataset frames/s", flush=True)
     video_seconds = time.perf_counter() - video_started
     w = source.metadata.features["observation.image.head_left"]["shape"][1]
     h = source.metadata.features["observation.image.head_left"]["shape"][0]
@@ -88,6 +119,7 @@ def prepare(root, destination, config):
                 "timings": {"source_alignment_seconds": alignment_seconds,
                             "table_write_seconds": tables_seconds,
                             "video_decode_encode_statistics_seconds": video_seconds,
+                            "video_workers": video_workers,
                             "recordings": recordings},
                 "video_encoding": {"codec": "h264", "encoder": "libx264", "pixel_format": "yuv420p",
                                    "crf": 18, "preset": "veryfast", "b_frames": 0,
@@ -97,18 +129,21 @@ def prepare(root, destination, config):
     return manifest
 
 
-def _encode_group(source, episodes, destination, entries):
-    """At most four encoders and one decoder live at once, regardless of bag size."""
-    fps = source.config.fps
+def _encode_group(job):
+    """One decoder/four encoders per worker; no numeric source crosses processes."""
+    started = time.perf_counter()
+    episodes, fps = job.episodes, job.fps
+    frames = sum(ep.length for ep in episodes)
+    print(f"Encoding {job.bag}: {len(episodes)} episodes, {frames} frames", flush=True)
     ep_cursor, output_index, outputs, histograms = 0, 0, {}, {}
-    first = episodes[0].videos["observation.image.head_left"]
-    wanted = source.audit(episodes[0])["video_packet_index"]
+    image_stats = {}
+    wanted = episodes[0].indices
 
     def begin(ep):
         for camera in CAMERAS:
-            output = av.open(str(destination / entries[ep.index]["videos"][f"observation.image.{camera}"]), "w")
+            output = av.open(str(ep.videos[f"observation.image.{camera}"]), "w")
             stream = output.add_stream("libx264", rate=fps)
-            stream.width, stream.height, stream.pix_fmt = first.width, first.height, "yuv420p"
+            stream.width, stream.height, stream.pix_fmt = job.width, job.height, "yuv420p"
             stream.options = H264_OPTIONS.copy()
             stream.codec_context.thread_count = 1
             stream.codec_context.gop_size = fps
@@ -124,14 +159,14 @@ def _encode_group(source, episodes, destination, entries):
             for packet in stream.encode(None):
                 out.mux(packet)
             out.close()
-            entries[ep.index]["stats"][f"observation.image.{camera}"] = histograms[camera].result()
+            image_stats.setdefault(ep.index, {})[f"observation.image.{camera}"] = histograms[camera].result()
         outputs.clear()
 
     try:
         begin(episodes[ep_cursor])
         # Consume through EOF even after the last selected frame: validate the
         # one-packet/one-frame contract and detect corrupt discarded tails too.
-        for frame_index, frame in decode_quad(first.paths):
+        for frame_index, frame in decode_quad(job.paths):
             if ep_cursor >= len(episodes) or frame_index < wanted[output_index]:
                 continue
             rgb = frame.to_ndarray(format="rgb24")
@@ -153,7 +188,7 @@ def _encode_group(source, episodes, destination, entries):
                     finish(ep)
                     ep_cursor += 1
                     if ep_cursor < len(episodes):
-                        wanted = source.audit(episodes[ep_cursor])["video_packet_index"]
+                        wanted = episodes[ep_cursor].indices
                         output_index = 0
                         begin(episodes[ep_cursor])
                     else:
@@ -163,3 +198,4 @@ def _encode_group(source, episodes, destination, entries):
     finally:
         for out, stream in outputs.values():
             out.close()
+    return ({"bag": job.bag, "frames": frames, "video_seconds": time.perf_counter() - started}, image_stats)

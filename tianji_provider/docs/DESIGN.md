@@ -63,6 +63,7 @@ tianji = "tianji_provider.provider:provider"
 | [media.py](../src/tianji_provider/media.py) | H.264 顺序解码、四宫格裁分、PPM 帧、图像统计 | 将大体积图像保持为有界流式处理 |
 | [source.py](../src/tianji_provider/source.py) | 原始/缓存双路径、Arrow 表、Episode、DatasetMetadata、审计 | 对上游暴露统一只读 DatasetSource |
 | [diagnostics.py](../src/tianji_provider/diagnostics.py) | 逐条检查、错误分类、缺口明细与进度回调 | 允许数值/视频独立检查，一条失败后仍检查其他条 |
+| [execution.py](../src/tianji_provider/execution.py) | 有界 spawn 进程调度、失败清理 | 执行资源独立于数据语义；任务异常、意外退出、提前关闭均回收进程 |
 | [prepare.py](../src/tianji_provider/prepare.py) | 缓存写入、H.264 编码、完成清单、复用判断 | 把有副作用的准备操作与只读 source 分开 |
 | [cli.py](../src/tianji_provider/cli.py) | check/inspect/prepare 子命令、报告与退出码 | 提供辅助工具，不承担目标 LeRobot 后端职责 |
 | [__init__.py](../src/tianji_provider/__init__.py) | 包版本和 LeTools 导入引导 | 避免入口发现与直接导入 provider 子模块时的初始化顺序问题 |
@@ -140,7 +141,9 @@ Report 记录候选边界、裁剪前后帧数、trim 窗口、每路无效帧�
 | 原始 MCAP 直接转换 | `TianjiFrames(FrameSequence)`，RGB PPM 编码的独立图像帧 | 每相机顺序解码、裁分、按需输出批次；LeTools 再按其编码配置生成视频 |
 | Prepare 缓存转换 | `VideoSlice`，缓存 MP4 中完整 episode 的 `[0, length/fps]` 范围 | 复用 H.264 包，由 LeTools 合并/分片/封装，不重复有损转码 |
 
-PPM 避免旧 JPEG 中间帧先损失细节，代价是较大的批次内存。随机读取 FrameSequence 会建立新的顺序解码过程，不代表 MP4 任意位置 O(1) 读取。Prepare 用一个解码器同时裁出四路，流式编码与计算 RGB 通道直方图；重复帧复用裁分画面并按重复次数计入统计。
+PPM 避免旧 JPEG 中间帧先损失细节，代价是较大的批次内存。随机读取 FrameSequence 会建立新的顺序解码过程，不代表 MP4 任意位置 O(1) 读取。Prepare 每个 worker 用一个解码器同时裁出四路，流式编码与计算 RGB 通道直方图；重复帧复用裁分画面并按重复次数计入统计。
+
+Prepare 数值 source 加载及表格/审计写入仍在父进程，视频按 bag 有界并行。任务只传本条视频路径、尺寸、输出路径及帧索引，不 pickle 完整 DataSource。子进程返回图像统计和耗时，父进程按原录制顺序合并清单。只有所有视频任务成功后才写清单；异常会终止并 join 池中其余任务。子进程继承调用方进程组，Web 的进程组取消可覆盖完整树。`workers` 不进入 TianjiConfig 或缓存身份。
 
 Prepare 写数值和审计后编码，清单最后写入；它是完成标识，但整个 prepare 目录写入并非平台式原子发布。失败会留下未完成目录，不会被当成有效缓存。转换输出由 LeTools 管理，8095 在此之上还加自己的暂存/深度验证/发布阶段。
 
@@ -153,6 +156,8 @@ Prepare 写数值和审计后编码，清单最后写入；它是完成标识，
 原始 source 一次加载会保留所有对齐后的低维表格；准备源按需读取 Parquet。Media/data profile 告诉 LeTools 哪些 episode 共享物理资源、大小和是否要编码，使核心规划器无需理解 MCAP。
 
 ## check、inspect 和网页为什么单独存在
+
+Check 使用同一有界执行模块并行处理录制；结果虽可乱序完成，父进程按排序后的录制次序进行尺寸一致性校验和 progress 回调，不能让完成较快的录制抢先成为尺寸基准。单 worker 直接调用、无子进程；异常退出检测使用 Pool 初始 Process 句柄快照（单处私有 `_pool` 读取），升级 Python 后应运行相关崩溃测试，避免 worker 丢失任务后永久等待。
 
 Check 的目标是完整的逐条诊断，因此数值与视频分支独立尝试，之后才能执行对齐与结构化缺口分析。Source 的目标是提供可靠数据，遇到不满足契约的输入就失败；inspect 走这个 source 路径，但关闭图像统计。Prepare 同样使用 source 的对齐结果并负责写缓存。三者共享核心算法，报告形态与失败策略不同。
 

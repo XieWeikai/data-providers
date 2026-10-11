@@ -1,6 +1,7 @@
 """Read-only, per-recording diagnostics using the converter's timing policies."""
 
 from dataclasses import asdict
+from contextlib import closing
 from pathlib import Path
 import time
 
@@ -11,6 +12,7 @@ from .alignment import (COMMAND_STATE, FEEDBACK_TOPICS, WRENCH_TOPICS, align, ca
                         command_age_ns, command_samples, output_grids, runs)
 from .media import decode_quad, dimensions
 from .reader import read_numeric, read_video_times, video_files
+from .execution import iter_parallel
 
 REPORT_FORMAT = "tianji-diagnostics-v1"
 
@@ -159,24 +161,35 @@ def check_recording(bag, config, *, deep_video=True):
             "alignment": alignment, "seconds": time.monotonic()-started}
 
 
-def check_dataset(root, config, *, deep_video=True, progress=None):
+def _check_job(job):
+    bag, config, deep_video = job
+    return check_recording(bag, config, deep_video=deep_video)
+
+
+def check_dataset(root, config, *, deep_video=True, progress=None, workers=None):
     """Check all recordings even when one fails; caller owns report persistence."""
     started = time.monotonic()
     bags = discover_for_check(root)
-    results, expected_size = [], None
-    for index, bag in enumerate(bags):
-        result = check_recording(bag, config, deep_video=deep_video)
-        size = result["video"]["quad_size"]
-        if size is not None:
-            if expected_size is None:
-                expected_size = size
-            elif size != expected_size:
-                result["issues"].append(_issue("inconsistent_video_dimensions", "error",
-                    f"Expected {expected_size}, got {size}"))
-                result.update(valid=False, frames=0)
-        results.append(result)
-        if progress is not None:
-            progress(index+1, len(bags), result)
+    results, expected_size, ready = [], None, {}
+    jobs = [(bag, config, deep_video) for bag in bags]
+    with closing(iter_parallel(_check_job, jobs, workers=workers)) as completed:
+        for index, result in completed:
+            ready[index] = result
+            # Cross-recording size checks and callbacks retain sorted bag order,
+            # regardless of which process finished first.
+            while len(results) in ready:
+                result = ready.pop(len(results))
+                size = result["video"]["quad_size"]
+                if size is not None:
+                    if expected_size is None:
+                        expected_size = size
+                    elif size != expected_size:
+                        result["issues"].append(_issue("inconsistent_video_dimensions", "error",
+                            f"Expected {expected_size}, got {size}"))
+                        result.update(valid=False, frames=0)
+                results.append(result)
+                if progress is not None:
+                    progress(len(results), len(bags), result)
     valid_count = sum(r["valid"] for r in results)
     return {"format": REPORT_FORMAT, "provider_version": __version__, "root": str(Path(root).resolve()),
             "config": asdict(config), "deep_video": deep_video,

@@ -127,18 +127,19 @@ CLI 不接受 `29.97` 这类非整数。时间交集或裁剪后的区间至少�
 
 | 参数 | 适用命令 | 默认 | 意义和边界 |
 |---|---|---|---|
+| `--workers N` | check、prepare | 自动：最多 8，且可用 CPU 数减 2，最低 1 | 正整数，实际不超过录制数；1 为串行。check 并行完整轨迹检查，prepare 并行视频阶段。执行参数不影响字段、质量或缓存身份 |
 | `--report PATH` | check、inspect | 不写文件 | 将完整 JSON 写入该文件，必要时创建父目录；同名文件会被重写，建议使用独立报告路径，不能指向原始数据文件 |
 | `--deep-video` | check | 开启 | 完整解码视频，验证所有帧映射、数量、顺序与尺寸；不编码输出 |
 | `--no-deep-video` | check | 不启用此快速模式 | 仍读取全部视频消息时间戳/结构，但只解码首帧检查尺寸，不能排除后续坏帧 |
 | `-h` / `--help` | 所有命令/子命令 | 无 | 显示相应帮助后退出，不扫描数据 |
 
-`--report`、深度检查开关不属于 `TianjiConfig`，不改变对齐缓存。Prepare 没有 `--report` 或 `--no-deep-video`；其清单和审计路径由缓存结构固定。Inspect 没有 deep-video 开关；其快速范围由实现决定。
+`--workers`、`--report`、深度检查开关不属于 `TianjiConfig`，不改变对齐缓存。Prepare 没有 `--report` 或 `--no-deep-video`；其清单和审计路径由缓存结构固定。Inspect 没有 deep-video 开关；其快速范围由实现决定。
 
 ## 仅 Python API 存在的配置
 
 `TianjiConfig.preset` 默认且只允许 `thor-v1`，定义已验证的 topic/坐标系/字段契约。**当前 CLI 没有 `--preset` 参数**，也没有任意 topic 名称映射开关。不能通过换一个字符串适配另一种机器人。
 
-`TianjiSource(..., _collect_image_stats=False)` 是内部控制选项，供 inspect 和 prepare 延后/省略图像统计使用；不是公共 CLI 调参入口。Check 的 Python API 另有 `deep_video` 和 `progress` 回调，分别控制解码范围与逐轨迹进度，不是输出信号参数。
+`TianjiSource(..., _collect_image_stats=False)` 是内部控制选项，供 inspect 和 prepare 延后/省略图像统计使用；不是公共 CLI 调参入口。`prepare(..., workers=None)` 与 `check_dataset(..., workers=None)` 可控制录制并发；check 的 `deep_video` 控制解码范围，`progress` 在父进程按稳定顺序回调。多进程采用 spawn，脚本调用必须放在 `if __name__ == '__main__':` 保护下；交互环境可显式 workers=1。这些都不是输出信号参数。
 
 ## 常见 LeTools 参数：不属于 Tianji provider
 
@@ -168,6 +169,7 @@ LeTools workers 未显式指定时由其当前版本默认值决定，与网页�
 | 改 fps、wrench-fps 或任意对齐/运动阈值 | 不可以 |
 | 改 lowpass/linear、开启/关闭裁剪 | 不可以 |
 | 关闭裁剪后只改运动阈值 | 仍不可以，配置按完整字段匹配 |
+| 改 check/prepare workers | 可以，不改变数据语义和缓存配置 |
 | 改 report 路径或 check 深度 | 不影响缓存配置，但诊断覆盖范围不同 |
 | 改目标 v2.1/v3.0、LeTools workers | 可以，不改变 provider 时间语义 |
 | 旧 tianji-thor-v1/v2/v3 缓存换成 0.6.0 打开 | 不可以，必须重建为 tianji-thor-v4 |

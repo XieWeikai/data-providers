@@ -23,6 +23,9 @@ def main(argv=None):
     check.add_argument("--report", type=Path, help="Write machine-readable JSON diagnostics")
     check.add_argument("--deep-video", action=argparse.BooleanOptionalAction, default=True,
                        help="Decode every video frame to detect corruption and mapping errors (default: enabled)")
+    for command in (check, prepare):
+        command.add_argument("--workers", type=int, default=None,
+                             help="Recording workers (default: auto, at most 8); 1 runs serially; does not change data semantics")
     args = parser.parse_args(argv)
     try:
         config = provider.config_from_args(args, None)
@@ -34,7 +37,7 @@ def main(argv=None):
                 for issue in item["issues"]:
                     if issue["severity"] == "error":
                         print(f"  {issue['code']}: {issue.get('topic', '')} {issue['message']}", flush=True)
-            result = check_dataset(args.source, config, deep_video=args.deep_video, progress=progress)
+            result = check_dataset(args.source, config, deep_video=args.deep_video, progress=progress, workers=args.workers)
             if args.report:
                 args.report.parent.mkdir(parents=True, exist_ok=True)
                 args.report.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
@@ -43,7 +46,7 @@ def main(argv=None):
                 parser.exit(1)
         elif args.command == "prepare":
             from .prepare import prepare as run_prepare
-            result = run_prepare(args.source, args.destination, config)
+            result = run_prepare(args.source, args.destination, config, workers=args.workers)
             print(json.dumps({"cache": str(args.destination), "episodes": len(result["episodes"]),
                               "frames": sum(e["length"] for e in result["episodes"]), "fps": config.fps,
                               "wrench_fps": config.wrench_fps}, ensure_ascii=False))
