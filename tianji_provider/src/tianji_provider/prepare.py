@@ -138,7 +138,7 @@ def prepare(root, destination, config, *, workers=None, video_encoder="auto"):
     return manifest
 
 
-def _encode_group(job):
+def _encode_group(job, *, decoder=None):
     """One decoder/four encoders per worker; no numeric source crosses processes."""
     started = time.perf_counter()
     episodes, fps = job.episodes, job.fps
@@ -176,7 +176,7 @@ def _encode_group(job):
         begin(episodes[ep_cursor])
         # Consume through EOF even after the last selected frame: validate the
         # one-packet/one-frame contract and detect corrupt discarded tails too.
-        for frame_index, frame in decode_quad(job.paths):
+        for frame_index, frame in (decoder or decode_quad)(job.paths):
             if ep_cursor >= len(episodes) or frame_index < wanted[output_index]:
                 continue
             rgb = frame.to_ndarray(format="rgb24")
