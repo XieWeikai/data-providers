@@ -1,6 +1,6 @@
 # Tianji provider for LeTools
 
-本文描述 **tianji-provider 0.6.2**：读取 Thor / Tianji / Marvin Pro 的 ROS 2 MCAP 录制，将机器人信号和四路画面对齐，向 LeTools 提供 `DatasetSource`，由 LeTools 输出 LeRobot v2.1 / v3.0。Provider 不连接或控制机器人，读取源数据不需要 ROS 运行环境。0.6.2 增加长任务优先调度、可探测的 NVENC 编码，以及显式融合检查与准备的 API；保持既有字段、采样、补命令、裁剪、检查阈值和精确统计。视频编码器可以改变，缓存格式仍为 `tianji-thor-v4`。
+本文描述 **tianji-provider 0.6.3**：读取 Thor / Tianji / Marvin Pro 的 ROS 2 MCAP 录制，将机器人信号和四路画面对齐，向 LeTools 提供 `DatasetSource`，由 LeTools 输出 LeRobot v2.1 / v3.0。Provider 不连接或控制机器人，读取源数据不需要 ROS 运行环境。0.6.3 将 NVENC 探测加强为四路同时编码，并允许 auto 在运行期间硬件编码失败时整批重试软件配方；保留 0.6.2 的调度和融合流水线，以及全部字段、采样、补命令、裁剪、检查阈值和精确统计。缓存格式仍为 `tianji-thor-v4`。
 
 | 文档 | 内容 |
 |---|---|
@@ -72,7 +72,7 @@ uv pip install --python "$TIANJI_ENV/bin/python" \
 
 新环境应先按 data-web-platform 部署说明安装完整 LeTools/native 依赖；不要为更新 provider 重建使用中的 `.venv`。**从 0.6.0 升级时新增了 opencv-python-headless，并要求 mcap-ros2-support>=0.5.7,<0.6；首次升级不要直接使用 --no-deps 跳过依赖。** 全部依赖已满足且只需重装当前包时才可加 `--no-deps`。确认发现的 `tianji` 版本为 0.6.2、模块路径为预期仓库；不要复制其他全局环境的 provider 配置进来。
 
-NVENC 还依赖机器的 NVIDIA 驱动、硬件和当前 PyAV/FFmpeg 的编码器支持；仅在编码器名称列表中出现不代表能用。`auto` 通过独立进程实际编码、flush、解码和检查时间戳，只在探测失败时回退软件编码。没有 NVIDIA 硬件也可使用本包，不要求为 provider 重装系统驱动。
+NVENC 还依赖机器的 NVIDIA 驱动、硬件和当前 PyAV/FFmpeg 的编码器支持；仅在编码器名称列表中出现不代表能用。`auto` 通过独立进程同时打开四路编码器，实际编码、flush、解码和检查时间戳，探测失败时回退软件编码。共享 GPU 的资源可能随后改变，运行期间的硬件 codec 故障也可以触发一次整批软件重试。没有 NVIDIA 硬件也可使用本包，不要求为 provider 重装系统驱动。
 
 Web 服务在启动时发现 providers。更新后确认无运行/排队任务，再重启并读取实际环境：
 
@@ -237,9 +237,9 @@ letools convert /path/to/recordings /path/to/new-lerobot-v21 \
 
 ### 编码速度、画质与资源取舍
 
-`--video-encoder libx264` 保留原有 CRF18 软件编码，适合没有可用 NVENC 或希望生成较小文件的情况；`--video-encoder h264_nvenc` 要求探测成功，否则明确失败。`auto` 只在探测阶段回退，真实批量编码中发生故障不会混用编码器继续完成。
+`--video-encoder libx264` 保留原有 CRF18 软件编码，适合没有可用 NVENC 或希望生成较小文件的情况；`--video-encoder h264_nvenc` 要求探测和运行成功，否则明确失败。`auto` 遇到硬件 codec 的打开、编码或 flush 异常时，先终止并等待该批 worker，保留失败缓存到同级 `缓存名.failed-nvenc-随机串/cache` 和 `failure.json`，再用 libx264 从头检查并准备整批。原始输入指纹必须保持不变；最终清单仅包含软件配方，并记录 `fallback_stage=runtime`、原因、失败尝试路径及耗时。最多重试一次；显式 NVENC 请求、磁盘/封装/源解码错误、未知 worker 崩溃均不执行运行时回退。软件再次失败仍停止，不发布最终数据集。重试会增加耗时和临时磁盘占用，进度回调会从第 1 条重新开始。
 
-已验证的 24 条批次中，NVENC CQ16 视频体积约为原软件配方的 **3.896 倍**；融合批次的进程树采样峰值 RSS 约 **7.77 GB**。这是指定机器和样本的测量，不是固定倍率或内存上限。两条完整质量样本、9,084 个相机帧相对同一原始图像的 RGB/YUV 平方误差均不大于软件 CRF18；不能据此承诺任意数据上的无损视频。完整证据和范围见[第二阶段实验](docs/PERFORMANCE_ROUND2.md)。并发越高会同时占用更多 CPU、主存及编码会话；NVENC 最多 12 条录制、48 个相机会话，单会话探测不保证任何显卡都支持这个并发，可降低 workers 或固定软件编码。
+已验证的 24 条批次中，NVENC CQ16 视频体积约为原软件配方的 **3.896 倍**；融合批次的进程树采样峰值 RSS 约 **7.77 GB**。这是指定机器和样本的测量，不是固定倍率或内存上限。两条完整质量样本、9,084 个相机帧相对同一原始图像的 RGB/YUV 平方误差均不大于软件 CRF18；不能据此承诺任意数据上的无损视频。完整证据和范围见[第二阶段实验](docs/PERFORMANCE_ROUND2.md)。并发越高会同时占用更多 CPU、主存及编码会话；NVENC 最多 12 条录制、48 个相机会话，四会话探测不保证整个批次并发一直可用，可降低 workers 或固定软件编码。
 
 ## 准备缓存与复用
 

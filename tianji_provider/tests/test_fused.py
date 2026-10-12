@@ -139,6 +139,36 @@ def test_empty_video_is_reported_instead_of_stopping_the_batch(tmp_path, monkeyp
     assert _report_without_timing(result["report"]) == _report_without_timing(expected)
 
 
+@pytest.mark.parametrize("api", ["fused", "prepare"])
+def test_auto_retries_complete_batch_after_codec_failure(tmp_path, monkeypatch, api):
+    root, bags, config, counts = _fixture(tmp_path, monkeypatch)
+    encode = prepare_module._encode_group
+    calls = []
+    def failing_once(job, **kwargs):
+        calls.append(job.bag)
+        if len(calls) == 2:
+            raise encoding.HardwareEncodingError("synthetic NVENC resource failure")
+        return encode(job, **kwargs)
+    monkeypatch.setattr(prepare_module, "_encode_group", failing_once)
+    monkeypatch.setattr(fused, "_encode_group", failing_once)
+    output = tmp_path / "cache"
+    progress = []
+    if api == "fused":
+        result = fused.check_and_prepare(root, output, config, workers=1,
+            progress=lambda index, total, item: progress.append(index))
+        manifest = result["manifest"]
+        assert result["report"]["valid_recordings"] == 2
+        assert progress == [1, 1, 2]
+    else:
+        manifest = prepare_module.prepare(root, output, config, workers=1)
+    assert len(calls) == 4
+    assert manifest["video_encoding"] == encoding.LIBX264.metadata()
+    assert manifest["video_encoder_selection"]["fallback_stage"] == "runtime"
+    assert manifest["video_encoder_selection"]["requested"] == "auto"
+    assert len(source.TianjiSource(output, config).episodes) == 2
+    assert len(list(tmp_path.glob("cache.failed-nvenc-*/cache"))) == 1
+
+
 def test_dimensions_preserve_sorted_baseline_despite_reverse_completion(tmp_path, monkeypatch):
     root, _, config, _ = _fixture(tmp_path, monkeypatch, sizes={1: (16, 8)})
     expected = diagnostics.check_dataset(root, config, workers=1)
@@ -312,13 +342,11 @@ def test_cancellation_closes_execution_iterator_and_never_publishes(tmp_path, mo
 def test_last_snapshot_after_table_writes_still_prevents_manifest(tmp_path, monkeypatch):
     root, _, config, _ = _fixture(tmp_path, monkeypatch)
     original_snapshot = fused._snapshot
-    calls = []
-    def changed(path):
-        calls.append(True)
-        result = original_snapshot(path)
-        return result if len(calls) < 3 else result + [("modified just before publication",)]
-    monkeypatch.setattr(fused, "_snapshot", changed)
     output = tmp_path / "fused"
+    def changed(path):
+        result = original_snapshot(path)
+        return result + [("modified just before publication",)] if (output / "episode_000000/data.parquet").exists() else result
+    monkeypatch.setattr(fused, "_snapshot", changed)
     with pytest.raises(ValueError, match="before cache publication"):
         fused.check_and_prepare(root, output, config, workers=1)
     assert (output / "episode_000000/data.parquet").exists()

@@ -24,7 +24,7 @@ from . import __version__
 from .alignment import WRENCH_TOPICS, align, output_grids, previous_indices
 from .diagnostics import REPORT_FORMAT, _issue, discover_for_check, timing_issues
 from .execution import iter_parallel, worker_count
-from .encoding import LIBX264, encoding_workers, select_encoder, validate_encoder_request
+from .encoding import LIBX264, encoding_workers, select_encoder, validate_encoder_request, with_encoder_recovery
 from .media import CAMERAS, decode_quad, dimensions
 from .prepare import VideoEpisode, VideoJob, _encode_group, fingerprint
 from .reader import read_numeric, read_video_times, video_files
@@ -200,6 +200,17 @@ def _checked_recording(job):
 
 def check_and_prepare(root, destination, config, *, workers=None, progress=None,
                       video_encoder="auto", prepare_valid_only=False):
+    """Check and prepare; auto retries a hardware failure as an all-software batch.
+
+    Progress callbacks may restart at index one after an encoder retry. Only
+    the returned complete report is authoritative, never a partial attempt.
+    """
+    return with_encoder_recovery(destination, video_encoder, lambda: _snapshot(Path(root).expanduser().resolve()),
+        lambda codec, recovery: _check_and_prepare(root, destination, config, workers=workers,
+            progress=progress, video_encoder=codec, prepare_valid_only=prepare_valid_only, recovery=recovery))
+
+
+def _check_and_prepare(root, destination, config, *, workers, progress, video_encoder, prepare_valid_only, recovery):
     """Validate and prepare once; return ``report`` and successful ``manifest``.
 
     A fresh destination is required, including when input data fails checks.
@@ -225,6 +236,8 @@ def check_and_prepare(root, destination, config, *, workers=None, progress=None,
     if any(destination == bag.resolve() or destination.is_relative_to(bag.resolve()) for bag in bags):
         raise ValueError("The cache must be outside every selected raw recording")
     encoder, encoder_selection = _select_batch_encoder(video_encoder, bags, config.fps)
+    if recovery is not None:
+        encoder_selection.update(recovery)
     parallelism = encoding_workers(workers, len(bags), encoder)
     destination.mkdir(parents=True)
     print(f"Checking and preparing recordings in one pass: {encoder.name}, {parallelism} workers", flush=True)

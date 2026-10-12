@@ -19,7 +19,7 @@ from tianji_provider.source import FORMAT
 
 def successful_probe():
     return {"ok": True, "encoder": encoding.NVENC.name, "options": dict(encoding.NVENC.options),
-            "frames": 6, "width": 960, "height": 540, "fps": 50, "profile": "Main"}
+            "frames": 6, "sessions": 4, "width": 960, "height": 540, "fps": 50, "profile": "Main"}
 
 
 def test_recipes_are_immutable_serializable_and_describe_real_quality():
@@ -70,7 +70,7 @@ def test_hardware_probe_uses_same_interpreter_and_is_not_cached(monkeypatch):
         assert kwargs == {"capture_output": True, "text": True, "timeout": 20}
 
 
-@pytest.mark.parametrize("failure", ["crash", "timeout", "unavailable", "invalid_json", "wrong_recipe"])
+@pytest.mark.parametrize("failure", ["crash", "timeout", "unavailable", "invalid_json", "wrong_recipe", "single_session"])
 def test_auto_fallback_and_explicit_failure_never_silently_change_requested_codec(monkeypatch, failure):
     def run(*args, **kwargs):
         if failure == "timeout":
@@ -82,7 +82,10 @@ def test_auto_fallback_and_explicit_failure_never_silently_change_requested_code
         if failure == "invalid_json":
             return SimpleNamespace(returncode=0, stdout="not json", stderr="")
         report = successful_probe()
-        report["options"] = {"cq": "18"}
+        if failure == "single_session":
+            report["sessions"] = 1
+        else:
+            report["options"] = {"cq": "18"}
         return SimpleNamespace(returncode=0, stdout=json.dumps(report), stderr="")
     monkeypatch.setattr(encoding.subprocess, "run", run)
     spec, report = encoding.select_encoder("auto", 960, 540, 50)
@@ -224,7 +227,7 @@ def test_child_smoke_validator_can_be_exercised_with_software_codec(monkeypatch)
     # consumption of options, H.264 profile checks, flush and decode with x264.
     monkeypatch.setattr(encoding, "NVENC", encoding.LIBX264)
     report = encoding._run_probe(160, 96, 50)
-    assert report["ok"] and report["frames"] == 6
+    assert report["ok"] and report["frames"] == 6 and report["sessions"] == 4
 
 
 def test_child_smoke_rejects_options_ignored_by_real_codec(monkeypatch):

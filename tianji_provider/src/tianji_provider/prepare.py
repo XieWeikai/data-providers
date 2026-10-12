@@ -5,6 +5,7 @@ from contextlib import closing
 from pathlib import Path
 from fractions import Fraction
 import json
+import sys
 import time
 
 import av
@@ -16,7 +17,8 @@ from .reader import bag_files, discover, video_files
 from .source import FORMAT, TianjiSource, features
 from .execution import iter_parallel, worker_count
 from .encoding import (EncoderSpec, LIBX264, cache_encoder_matches, encoding_workers,
-                       select_encoder, validate_encoder_request)
+                       hardware_codec_call, select_encoder, validate_encoder_request,
+                       with_encoder_recovery)
 
 @dataclass(frozen=True)
 class VideoEpisode:
@@ -47,6 +49,13 @@ def fingerprint(root):
 
 
 def prepare(root, destination, config, *, workers=None, video_encoder="auto"):
+    """Prepare a cache; auto retries hardware codec failures once with software."""
+    return with_encoder_recovery(destination, video_encoder, lambda: fingerprint(Path(root).expanduser().resolve()),
+        lambda codec, recovery: _prepare(root, destination, config, workers=workers,
+                                        video_encoder=codec, recovery=recovery))
+
+
+def _prepare(root, destination, config, *, workers, video_encoder, recovery):
     """Decode each raw quad stream once for all segments and all four cameras.
 
     The manifest is written last. An interrupted cache cannot be opened as a
@@ -78,6 +87,8 @@ def prepare(root, destination, config, *, workers=None, video_encoder="auto"):
     alignment_seconds = time.perf_counter() - alignment_started
     first_media = episodes[0].videos["observation.image.head_left"]
     encoder, selection = select_encoder(video_encoder, first_media.width, first_media.height, config.fps)
+    if recovery is not None:
+        selection.update(recovery)
     print(f"Video encoder: {encoder.name}" +
           (f" (auto fallback: {selection['fallback_reason']})" if "fallback_reason" in selection else ""), flush=True)
     destination.mkdir(parents=True)
@@ -159,14 +170,14 @@ def _encode_group(job, *, decoder=None):
             stream.codec_context.max_b_frames = 0
             outputs[camera] = (output, stream)
             # Fail on ignored quality options instead of silently using defaults.
-            output.start_encoding()
+            hardware_codec_call(job.encoder, f"{job.bag}/{camera} open", output.start_encoding)
             if stream.codec_context.options:
                 raise ValueError(f"H.264 encoder ignored options: {stream.codec_context.options}")
             histograms[camera] = RGBStatistics()
 
     def finish(ep):
         for camera, (out, stream) in outputs.items():
-            for packet in stream.encode(None):
+            for packet in hardware_codec_call(job.encoder, f"{job.bag}/{camera} flush", stream.encode, None):
                 out.mux(packet)
             out.close()
             image_stats.setdefault(ep.index, {})[f"observation.image.{camera}"] = histograms[camera].result()
@@ -191,7 +202,7 @@ def _encode_group(job, *, decoder=None):
                     for k in range(output_index, stop):
                         image = av.VideoFrame.from_ndarray(tile, format="rgb24")
                         image.pts, image.time_base = k, Fraction(1, fps)
-                        for packet in stream.encode(image):
+                        for packet in hardware_codec_call(job.encoder, f"{job.bag}/{camera} encode", stream.encode, image):
                             out.mux(packet)
                 output_index = stop
                 if output_index == ep.length:
@@ -206,6 +217,13 @@ def _encode_group(job, *, decoder=None):
         if ep_cursor != len(episodes):
             raise ValueError("Video ended before all aligned rows could be encoded")
     finally:
+        unwinding = sys.exc_info()[0] is not None
+        close_error = None
         for out, stream in outputs.values():
-            out.close()
+            try:
+                out.close()
+            except Exception as error:
+                close_error = close_error or error
+        if close_error is not None and not unwinding:
+            raise close_error
     return ({"bag": job.bag, "frames": frames, "video_seconds": time.perf_counter() - started}, image_stats)

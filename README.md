@@ -8,7 +8,7 @@
 |---|---|---|---|
 | `tianji_provider/` | `tianji` | Tianji / Marvin Pro Thor 的 ROS 2 MCAP 轨迹与四宫格 H.264 视频 | [使用说明](tianji_provider/README.md) · [验证记录](tianji_provider/VALIDATION.md) |
 
-Tianji 文档入口：[全部参数详解](tianji_provider/docs/PARAMETERS.md) · [高频 wrench 窗口](tianji_provider/docs/WRENCH_WINDOWS.md) · [插件接口与内部设计](tianji_provider/docs/DESIGN.md) · [检查项目与报错](tianji_provider/docs/CHECKS.md) · [第二阶段性能实验](tianji_provider/docs/PERFORMANCE_ROUND2.md)。当前使用手册对应 0.6.2；VALIDATION 保留各版本的历史测量。
+Tianji 文档入口：[全部参数详解](tianji_provider/docs/PARAMETERS.md) · [高频 wrench 窗口](tianji_provider/docs/WRENCH_WINDOWS.md) · [插件接口与内部设计](tianji_provider/docs/DESIGN.md) · [检查项目与报错](tianji_provider/docs/CHECKS.md) · [第二阶段性能实验](tianji_provider/docs/PERFORMANCE_ROUND2.md)。当前使用手册对应 0.6.3；VALIDATION 保留各版本的历史测量。0.6.3 加强为四路并发 NVENC 探测，auto 的硬件 codec 运行故障可保留失败缓存并整批重试软件一次，数据检查规则不变。
 
 `SourceProvider` 负责参数和创建数据源，`DatasetSource` 提供元数据、episode 表格及媒体给 LeTools。Tianji 包另外提供 check、inspect、prepare 辅助工具；这些不是每个 provider 必须实现的标准命令，也不编辑原始 MCAP。LeRobot 目标布局由 LeTools 后端负责，8095 网页的任务编排在独立 data-web-platform 项目中。
 

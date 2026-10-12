@@ -1,4 +1,4 @@
-# 检查、报错与转换拦截（0.6.2）
+# 检查、报错与转换拦截（0.6.3）
 
 [返回使用手册](../README.md) · [参数详解](PARAMETERS.md) · [内部设计](DESIGN.md)
 
@@ -101,13 +101,13 @@ NaN 校验针对被提取到输出中的数值；不是对所有辅助消息的�
 
 无效根目录、误选准备缓存、未找到可识别录制、非法参数等可能在逐条检查之前失败，不会都有 `issues[].code`。Prepare/inspect 正常退出为 0；被 CLI 捕获的配置/读取/运行错误为 2，它们不使用 check 的逐条通过/失败汇总协议。未预期的程序异常可能显示 traceback，不能把命令级异常都当作一条新的数据缺口。
 
-NVENC 探测和编码发生在 prepare/融合入口，独立 check 不要求 GPU 编码成功。auto 只在独立探测进程失败、超时或崩溃时回退软件；显式 h264_nvenc 不可用会抛出 `Explicit h264_nvenc request cannot run`。实际编码中的 ignored options、编码失败或写盘失败不会触发静默回退。已有缓存配方与显式请求不符也会报错；这些是执行/缓存错误，不是新的 observation_gap。成功的输入检查不能证明任意显卡都支持当前批次的并发会话数。
+NVENC 探测和编码发生在 prepare/融合入口，独立 check 不要求 GPU 编码成功。auto 在独立探测失败、超时或崩溃时使用软件；0.6.3 还会对运行期间硬件 codec 的 ExternalError/MemoryError（如 CUDA 上下文分配失败）执行一次整批软件重试，并保留原因及失败缓存。显式 h264_nvenc 不可用会抛出 `Explicit h264_nvenc request cannot run`，运行错误也不回退。ignored options、非法参数、写盘/封装错误、源解码或未知 worker 崩溃仍直接失败。已有缓存配方与显式请求不符也会报错；这些是执行/缓存错误，不是新的 observation_gap。成功的输入检查不能证明任意显卡都支持当前批次的并发会话数。
 
 ## 检查如何影响 LeTools
 
 独立 check 只返回报告/退出码，不给 LeTools 安装一个全局“禁止转换”标记。单独运行 `letools convert` 或 `prepare` 不会查找旧 check.json。需要用 [使用手册](../README.md#推荐流程check--prepare--convert--validate) 的 `&&` 命令链或调用方逻辑，让 check 失败时停止后续操作，并保持语义配置一致。
 
-0.6.2 配套 8095 转换调用 `check_and_prepare(..., prepare_valid_only=False)`，合并阶段名为 `check_prepare`；仅检查按钮仍调用独立 `check_dataset(..., deep_video=True)`。任意选中轨迹 error 则整次任务停止，不写成功缓存、不进入 LeTools 转换或最终发布；期间可能已经生成部分准备文件。不会自动只转通过项，用户应取消失败项或明确改变参数后重新检查。改变阈值是改变可接受数据标准，不是修复缺失观测。尚未更新平台 worker 的部署仍走独立 check→prepare，仅升级 provider 包不会自动改变平台编排。
+当前 8095 平台 0.4.1 调用 `check_and_prepare(..., prepare_valid_only=True)`，合并阶段名为 `check_prepare`；仅检查按钮仍调用独立 `check_dataset(..., deep_video=True)`。所有选中轨迹都检查，逐条数据错误保留在报告中，只有通过项进入转换；全部异常不生成目标。Provider Python API 自身仍默认 `prepare_valid_only=False`（整批必须通过）。0.6.3 在 auto 模式下允许硬件 codec 运行故障触发一次整批软件重试；它不改变数据错误的判定和筛选。磁盘、源变化、未知 worker 崩溃、显式 NVENC 失败或软件重试失败均停止。改变阈值是改变可接受数据标准，不是修复缺失观测；实际流程由平台部署版本决定。
 
 平台还检查选择数量与报告数量一致、源文件在检查/准备期间的大小/mtime 等是否变化，并拒绝覆盖目标。融合 API 的快照和最后写清单不代替平台的最终验证与不覆盖发布。转换阶段失败仍会终止；check 通过不能预测磁盘不足、编码器故障或目标冲突。
 

@@ -1,4 +1,4 @@
-# 内部设计（0.6.2）
+# 内部设计（0.6.3）
 
 [返回使用手册](../README.md) · [参数详解](PARAMETERS.md) · [检查与报错](CHECKS.md)
 
@@ -157,9 +157,11 @@ Prepare 写数值和审计后编码，清单最后写入；它是完成标识，
 
 准备阶段提供两套明确配方：软件 `libx264` 使用 CRF18 / veryfast；硬件 `h264_nvenc` 使用 VBR / CQ16 / p4 / HQ / Main。都保持 H.264、yuv420p、原始单路尺寸、无 B 帧和 GOP=fps。选择只影响输出压缩视频，不改变数值、帧索引、选择时刻或精确 RGB 统计；CQ 与 CRF 不可按数字直接比较。
 
-`video_encoder="auto"` 每次新的准备调用只探测一次。父进程在独立 Python 子进程中尝试当前 NVENC 配方，对六个合成帧执行编码、flush、完整解码，检查 profile、尺寸、像素格式、PTS/DTS 和帧数；默认探测超时 20 秒。子进程不脱离调用方进程组。探测失败、超时或原生崩溃时 auto 才选择 x264；显式 h264_nvenc 失败直接抛出。软件请求不运行 GPU 探测。批量真正编码发生错误时一律失败，不能静默回退后混合配方。
+`video_encoder="auto"` 每次新的准备调用探测一次。父进程在独立 Python 子进程中同时打开四个当前配方的 NVENC 编码器，各对六个合成帧执行编码、flush、完整解码，检查 profile、尺寸、像素格式、PTS/DTS 和帧数；默认探测超时 20 秒。子进程不脱离调用方进程组。探测失败、超时或原生崩溃时 auto 选择 x264；显式 h264_nvenc 失败直接抛出。软件请求不运行 GPU 探测。
 
-每条视频 worker 仍只有一个解码器和四个单线程编码器。12 条 NVENC 录制意味着最多 48 个相机会话，探测单会话成功不保证所有机器都支持该并发。缓存记录 `video_encoding` 的真实 encoder/options/质量设置，以及 `video_encoder_selection` 的选择和探测结果；不把 NVENC 的 CQ 写成 CRF。
+运行时只在硬件 codec 的打开、编码、flush 调用边界捕获 FFmpeg 异常并封装为可跨进程传递的 `HardwareEncodingError`，附带驱动日志。auto 收到它后先结束原 worker 池，将本次未完成缓存移动到唯一同级诊断目录，再以 libx264 重跑整批，最终只写一种配方。失败尝试的文件、原因和耗时保留，不删除用户目录；输入必须保持原指纹。最多一次软件重试；显式编码请求、源解码、mux/文件写入和未知 worker 崩溃不走此分支。重试期间 progress 可以从 1 重新开始，最终返回的完整报告才是最终结论。
+
+每条视频 worker 仍只有一个解码器和四个单线程编码器。12 条 NVENC 录制意味着最多 48 个相机会话，四会话探测不保证共享 GPU 在整个批次中都支持该并发。缓存记录 `video_encoding` 的真实 encoder/options/质量设置，以及 `video_encoder_selection` 的选择、探测或运行时回退原因；不把 NVENC 的 CQ 写成 CRF。
 
 24 条验收中，NVENC 配方的视频字节数约为软件 CRF18 的 3.896 倍；融合批次进程树采样峰值 RSS 约 7.77 GB。质量证据为两条、9,084 个相机帧的逐帧 RGB/YUV 误差对照，不能扩写为任意轨迹无损或固定内存上限。具体实验范围见 [PERFORMANCE_ROUND2.md](PERFORMANCE_ROUND2.md)。
 
@@ -180,7 +182,7 @@ Prepare 写数值和审计后编码，清单最后写入；它是完成标识，
 
 ## 缓存、计划和版本
 
-三个版本概念独立：包版本 `0.6.2`、provider API `2`、缓存格式 `tianji-thor-v4`；目标可以是 LeRobot v2.1 或 v3.0。0.6.2 保持 0.6.0 的字段与信号语义，编码配方单独记录在 manifest，不升级缓存格式。
+三个版本概念独立：包版本 `0.6.3`、provider API `2`、缓存格式 `tianji-thor-v4`；目标可以是 LeRobot v2.1 或 v3.0。0.6.3 保持 0.6.0 的字段与信号语义，编码配方单独记录在 manifest，不升级缓存格式。
 
 普通 prepare 的缓存复用比较格式、完整配置（排除 task）、MCAP 路径/大小/mtime 指纹，以及请求对应的编码配方白名单。auto 接受旧/当前 x264 CRF18 或当前 NVENC CQ16/Main 配方；显式请求只接受自身配方，旧 x264 缺少 options 字典可按其质量字段识别。任意 H.264 或其他 CQ/profile 不能借 auto 直接复用。缓存命中不再探测 GPU。
 
