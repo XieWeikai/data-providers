@@ -194,7 +194,7 @@ Check 使用同一有界执行模块并行处理录制；结果虽可乱序完�
 
 Check 的目标是完整的逐条诊断，因此数值与视频分支独立尝试，之后才能执行对齐与结构化缺口分析。Source 的目标是提供可靠数据，遇到不满足契约的输入就失败；inspect 走这个 source 路径，但关闭图像统计。Prepare 同样使用 source 的对齐结果并负责写缓存。三者共享核心算法，报告形态与失败策略不同。
 
-0.6.2 配套 Web 使用严格模式的融合 API，再 convert、deep validation 和不覆盖发布；检查与准备阶段如实标为 `check_prepare`。仅检查按钮仍执行独立 check。融合时可能先产生未完成准备文件，整批通过才允许后续转换；Web 不启用有效子集模式。检查通过不能保证磁盘、编码器、输出目录或后端永不失败。仅安装新版 provider 不会自动改写旧 Web worker，实际流程由平台部署版本决定。
+Provider 0.6.2 的融合 API 被 Web 调用后，再执行 convert、deep validation 和不覆盖发布；检查与准备阶段如实标为 `check_prepare`。Web 0.3.0 起使用 `prepare_valid_only=True`，保留所有输入的严格诊断、只转换通过项并显示跳过清单及前后episodes/时长；Web 0.2.0 则要求整批通过。仅检查按钮仍执行独立 check。全部异常、磁盘/编码器故障或后端失败都不能冒充成功输出。仅安装新版 provider 不会自动改写旧 Web worker，实际流程由平台部署版本决定。
 
 ## 扩展时的约束
 

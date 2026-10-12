@@ -207,7 +207,7 @@ if __name__ == "__main__":
 
 默认 `prepare_valid_only=False` 要求所选录制全部通过。融合过程可能已在新缓存目录生成部分视频，但任一轨迹检查失败就返回完整报告、`manifest=None`，不写 `tianji-cache.json`，不生成或发布最终 LeRobot 数据集。编码器、磁盘或进程故障直接抛出异常；失败目录拒绝覆盖，可保留诊断并换新目录重试。
 
-只有调用者明确要输出有效子集时，才传 `prepare_valid_only=True`。全部输入仍执行相同 deep check；存在失败时 `report["valid"]` 仍为 False，错误不会变成 warning。成功清单只引用通过项，episode/global index 连续重编，`selection` 和清单的 `source_selection` 保存拒绝清单与原输入到输出的映射；全部失败时依然没有 manifest。原始数据不删、不修、不拆，缓存中的录制文件夹编号可能有空档，应按清单读取。此选项暂未提供 CLI，配套 Web 始终使用默认严格模式。
+只有调用者明确要输出有效子集时，才传 `prepare_valid_only=True`。全部输入仍执行相同 deep check；存在失败时 `report["valid"]` 仍为 False，错误不会变成 warning。成功清单只引用通过项，episode/global index 连续重编，`selection` 和清单的 `source_selection` 保存拒绝清单与原输入到输出的映射；全部失败时依然没有 manifest。原始数据不删、不修、不拆，缓存中的录制文件夹编号可能有空档，应按清单读取。此选项暂未提供 CLI；配套 Web 0.3.0 起显式使用此模式，并显示异常跳过清单、转换前后episodes及累计时长。Web 0.2.0 则要求全部选中项通过，实际行为取决于平台版本。
 
 融合入口要求全新缓存目录，不自动复用已有缓存。它没有全局隐式状态；单独运行一次 check 后再调用它，也不会自动继承旧结果。每条数值读取和对齐一次，完整视频解码一次；视频时间戳另行扫描，自动编码器探测可能额外读取首帧。每帧检查在输出选择前执行，被裁剪尾部仍检查。详细参数与结果字段见[参数详解](docs/PARAMETERS.md#python-api-执行参数)。
 

@@ -73,7 +73,7 @@ Tailscale中继偶发握手超时后，长实验采用nohup保存独立日志，
 
 融合入口要求新缓存目录，并在读取前、完整检查后、清单发布前核对源/选择快照。编码器或文件系统故障会抛出，不冒充数据检查通过；取消关闭进程池；最后才写完成清单。默认 `prepare_valid_only=False`：任一轨迹error则返回完整报告且无manifest，不转换、不发布目标；因此可能有隔离的未完成准备文件，但不会删除或拆分原始轨迹。
 
-显式 `prepare_valid_only=True` 只改变输出选择：全部输入仍做deep check，报告保留失败状态和拒绝清单，仅给通过项创建连续episode/global index，manifest记录原输入到输出的映射。125→114验收使用此显式模式。Web始终使用False，不悄悄跳过用户选中的异常轨迹。独立check/prepare接口和缓存读取继续可用；它们依然是两个独立调用，不会自动共享中间数据。
+显式 `prepare_valid_only=True` 只改变输出选择：全部输入仍做deep check，报告保留失败状态和拒绝清单，仅给通过项创建连续episode/global index，manifest记录原输入到输出的映射。125→114验收使用此显式模式。本轮验收时Web使用False；后续Web 0.3.0按用户要求改为True，明确显示异常跳过及前后统计。独立check/prepare接口和缓存读取继续可用；它们依然是两个独立调用，不会自动共享中间数据。
 
 性能试验使用隔离web worker适配器，把阶段如实显示为 `check_prepare`；原convert、deep validation和不覆盖发布流程保持原样。Provider本地196项通过、3项真实MCAP opt-in跳过；Thor融合专项19项通过。隔离worker3项、全量编排2项回归通过，另经独立只读审查。全量125条验证另记最终验收，不将24条比例外推当作实测结果。
 
