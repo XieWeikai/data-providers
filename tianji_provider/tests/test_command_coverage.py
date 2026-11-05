@@ -203,7 +203,7 @@ def test_reader_allows_empty_or_absent_command_topics(tmp_path, monkeypatch, met
         assert signals[topic].values.shape == (0, 7 if "joint_cmd" in topic else 1)
 
 
-@pytest.mark.parametrize("topic", ["/tj/joint_states", "/info/gripper_feedback_R", "/info/web_gripper", "/tj/info/eef_left"])
+@pytest.mark.parametrize("topic", ["/tj/joint_states", "/info/gripper_feedback_R", "/tj/info/eef_left"])
 def test_reader_still_rejects_absent_observations(tmp_path, monkeypatch, topic):
     bag = fake_recording(tmp_path, monkeypatch, omit=[topic])
     with pytest.raises(ValueError):

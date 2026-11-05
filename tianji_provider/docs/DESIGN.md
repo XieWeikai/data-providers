@@ -84,7 +84,7 @@ tianji = "tianji_provider.provider:provider"
 
 有 Header 用 `header.stamp`，无 Header 用 MCAP log_time；Header 非法或与记录时间相差超过 1 秒就失败。同 topic 时间倒退不通过排序掩盖；相同时间戳保留最后一条更新。已录制的辅助 topic 也参与时间范围与时钟检查。
 
-只有四路 action 命令允许缺失或整段为空，reader 为它们返回维度明确的空 Signal，不伪造消息时间；观测与标定缺失仍失败，metadata 中声明为空的非豁免 topic 也失败。非空的坏命令不能借补齐逻辑隐藏。
+只有四路 action 命令允许缺失或整段为空，reader 为它们返回维度明确的空 Signal，不伪造消息时间；必需观测缺失仍失败，metadata 中声明为空的非豁免 topic 也失败。夹爪使用固定 `[0,1.6]` rad 映射，不读取 `/info/web_gripper`，该 topic 为空或缺失均不影响转换。非空的坏命令不能借补齐逻辑隐藏。
 
 视频用专用解析器读取标准 CompressedImage CDR 包，校验编码、长度和 schema，避免把大 H.264 字节数组展开成 Python 整数。视频 Header 与记录时间要求相等、时间严格递增且至少两帧。解码器为每包设置顺序标识并核对返回帧顺序与数量，拒绝含糊的帧/消息对应关系。
 

@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-import json
 import struct
 
 import numpy as np
@@ -15,6 +14,8 @@ from .decoder import CompiledDecoderFactory
 
 VIDEO_TOPIC = "/recorder/quad_tile/compressed_undistorted"
 JOINT_NAMES = tuple(f"Joint{i}_{side}" for side in ("L", "R") for i in range(1, 8))
+# thor-v1 driver maps each normalized gripper target onto this motor-angle range.
+GRIPPER_CALIBRATION = ((0.0, 1.6), (0.0, 1.6))
 TYPES = {
     "/tj/joint_states": "sensor_msgs/msg/JointState",
     "/tj/control/joint_cmd_A": "marvin_msgs/msg/JointcmdArm",
@@ -23,7 +24,6 @@ TYPES = {
     **{f"/control/gripperValue{s}": "std_msgs/msg/Float32" for s in ("L", "R")},
     **{f"/tj/info/eef_{s}": "geometry_msgs/msg/PoseStamped" for s in ("left", "right")},
     **{f"/tj/info/wrench_{s}": "geometry_msgs/msg/WrenchStamped" for s in ("left", "right")},
-    "/info/web_gripper": "std_msgs/msg/String",
 }
 
 
@@ -96,14 +96,17 @@ def normalize_signal(times, values, topic):
 def read_numeric(bag):
     metadata = yaml.safe_load((bag / "data/metadata.yaml").read_text())["rosbag2_bagfile_information"]
     empty = [v["topic_metadata"]["name"] for v in metadata.get("topics_with_message_count", [])
-             if v["message_count"] == 0 and v["topic_metadata"]["name"] not in COMMAND_STATE]
+             if v["message_count"] == 0 and v["topic_metadata"]["name"] not in COMMAND_STATE
+             and v["topic_metadata"]["name"] != "/info/web_gripper"]
     if empty:
         raise ValueError(f"{bag.name}: cannot intersect empty recorded topics: {empty}")
-    samples = {k: ([], []) for k in TYPES if k != "/info/web_gripper"}
-    ranges, calibration, clocks = {}, None, {}
+    samples = {k: ([], []) for k in TYPES}
+    ranges, calibration, clocks = {}, np.asarray(GRIPPER_CALIBRATION), {}
     previous = {}
     for schema, channel, record, msg in messages(bag_files(bag / "data")):
         topic = channel.topic
+        if topic == "/info/web_gripper":
+            continue
         t = stamp_ns(msg, record.log_time)
         if t < previous.get(topic, t):
             raise ValueError(f"{bag.name}: {topic} clock reversal")
@@ -115,17 +118,6 @@ def read_numeric(bag):
             continue
         if schema.name != TYPES[topic]:
             raise ValueError(f"{topic}: expected {TYPES[topic]}, got {schema.name}")
-        if topic == "/info/web_gripper":
-            status = json.loads(msg.data)
-            limits = np.asarray(status.get("calibration"), dtype=np.float64)
-            if limits.shape != (2, 2) or not np.isfinite(limits).all() or np.any(limits[:, 1] <= limits[:, 0]):
-                raise ValueError(f"{bag.name}: missing/invalid recorded gripper calibration")
-            if status.get("position_unit") != "motor_radian" or status.get("target_unit") != "normalized_0_1":
-                raise ValueError(f"{bag.name}: unsupported gripper units")
-            if calibration is not None and not np.array_equal(calibration, limits):
-                raise ValueError(f"{bag.name}: gripper calibration changed within the recording")
-            calibration = limits
-            continue
         if topic == "/tj/joint_states":
             if set(msg.name) != set(JOINT_NAMES) or len(msg.name) != 14 or len(msg.position) != 14:
                 raise ValueError(f"{topic}: expected the 14 named Tianji joints")
@@ -156,8 +148,6 @@ def read_numeric(bag):
             value = [f.x, f.y, f.z, q.x, q.y, q.z]
         samples[topic][0].append(t)
         samples[topic][1].append(value)
-    if calibration is None:
-        raise ValueError(f"{bag.name}: /info/web_gripper calibration is required; no guessed motor limits")
     result = {}
     for topic, (times, values) in samples.items():
         if topic in COMMAND_STATE and not times:
@@ -165,7 +155,7 @@ def read_numeric(bag):
             result[topic] = Signal(np.empty(0, dtype=np.int64), np.empty((0, width), dtype=np.float64))
         else:
             result[topic] = normalize_signal(times, values, topic)
-    # Express feedback in the driver's recorded normalized target coordinate.
+    # Express feedback in the thor-v1 driver's fixed normalized target coordinate.
     # Do not clip small telemetry overshoots; retain measured information.
     for side, (lo, hi) in zip(("L", "R"), calibration):
         result[f"/info/gripper_feedback_{side}"].values = (

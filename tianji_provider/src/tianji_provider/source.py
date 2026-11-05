@@ -18,7 +18,7 @@ from .execution import iter_parallel
 from .media import CAMERAS, TianjiFrames, dimensions, image_statistics
 from .reader import bag_files, discover, read_numeric, read_video_times, video_files
 
-FORMAT = "tianji-thor-v4"
+FORMAT = "tianji-thor-v4-fixed-gripper"
 GENERATED = {"timestamp": "float32", "frame_index": "int64", "episode_index": "int64", "index": "int64", "task_index": "int64"}
 
 

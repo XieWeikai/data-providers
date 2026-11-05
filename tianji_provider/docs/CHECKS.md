@@ -28,7 +28,7 @@ Check 会检查所有可识别录制。每条先分别尝试数值读取和视�
 | 必需观测/辅助 topic | 必需反馈等没有消息，或 metadata 中声明了空的非豁免 topic | `numeric_read_error` / `empty or non-finite signal`、`cannot intersect empty recorded topics` |
 | Schema 与维度 | 消息类型错误，关节反馈不是约定的 14 个命名关节，关节命令不是 7 维，夹爪反馈不是 5 项 | `numeric_read_error` / `expected ...` |
 | 数值与目标范围 | 用于输出的数值含 NaN/Inf；夹爪目标不在 [0,1] | `numeric_read_error` / `non-finite signal`、`target must be normalized to [0, 1]` |
-| 夹爪标定 | 缺少合法 2×2 标定、上限不大于下限、单位错误、中途改变 | `numeric_read_error` / `missing/invalid recorded gripper calibration`、`unsupported gripper units`、`calibration changed` |
+| 夹爪角度映射 | 左右固定使用 `[0.0,1.6]` rad，反馈除以 1.6；不依赖 `/info/web_gripper` | 不再报告该 topic 的标定缺失、JSON/单位错误或中途变化；反馈自身的数值与时间检查仍保留 |
 | 坐标系 | EEF 不是 base_link，左右 wrench 不是 flange_L/flange_R | `numeric_read_error` / `expected base_link` 等 |
 | 数值时钟 | Header 非法/零值，与 MCAP 相差超过 1 秒，或同一 topic 时间倒退 | `numeric_read_error` / `Invalid/zero ROS header timestamp`、`clocks differ`、`clock reversal` |
 | 视频定位 | 无法找到唯一的四宫格 bag 或其引用文件 | `video_read_error` / `expected exactly one quad-camera bag` |
