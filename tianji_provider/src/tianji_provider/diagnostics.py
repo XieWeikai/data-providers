@@ -6,12 +6,13 @@ from pathlib import Path
 import time
 
 import numpy as np
+import yaml
 
 from . import __version__
 from .alignment import (COMMAND_STATE, FEEDBACK_TOPICS, WRENCH_TOPICS, align, candidate_interval,
-                        command_age_ns, command_samples, output_grids, runs)
+                        command_age_ns, command_coverage, output_grids, runs)
 from .media import decode_quad, dimensions
-from .reader import read_numeric, read_video_times, video_files
+from .reader import TYPES, read_numeric, read_video_times, video_files
 from .execution import iter_parallel
 
 REPORT_FORMAT = "tianji-diagnostics-v1"
@@ -42,8 +43,9 @@ def timing_issues(signals, ranges, video_times, config, alignment=None):
     """Report every sampling gap, including all topics in a shared outage.
 
     Feedback must support the entire pre-trim interval. Other observations only
-    block conversion when they affect retained output points. Command pauses
-    are informational because the converter supplies the same-frame state.
+    block conversion when they affect retained output points. Joint targets
+    never expire; their prefixes initialize from feedback. Gripper targets
+    retain their configured age limit.
     """
     start, end = candidate_interval(signals, ranges, video_times, config)
     grid, wrench_grid = output_grids(start, end, config)
@@ -51,27 +53,36 @@ def timing_issues(signals, ranges, video_times, config, alignment=None):
     if alignment is not None:
         trim = alignment["trim"]
         retained = (grid >= trim["output_start_ns"]) & (grid <= trim["output_end_ns"])
+        if alignment.get('dagger_training_contract') == 'physically_separated_expert_episodes_no_invalid_targets':
+            retained=np.zeros(len(grid),dtype=bool)
+            for segment in alignment['segments']:
+                retained |= (grid>=segment['start_ns']) & (grid<=segment['end_ns'])
         output = grid[retained]
         wrench_grid = wrench_grid[retained]
     issues = []
-    command_counts = np.zeros(len(output), dtype=np.int8)
     for topic in COMMAND_STATE:
         signal = signals[topic]
         age_ns = command_age_ns(topic, config)
-        indices, fresh = command_samples(signal, output, age_ns)
-        command_counts += fresh
-        for a, b in runs(~fresh):
-            issues.append(_issue("command_pause_filled", "info", "Absent/stale command uses same-frame state",
+        indices, fresh, prefix = command_coverage(signal, output, age_ns, topic)
+        for a, b in runs(prefix):
+            issues.append(_issue("joint_command_prefix_initialized", "info",
+                "Joint target before the first recorded command uses same-frame feedback as a hold target",
                 topic=topic, start_ns=int(output[a]), end_ns=int(output[b-1]),
                 start_seconds=float((output[a]-start)/1e9), end_seconds=float((output[b-1]-start)/1e9),
-                affected_frames=b-a, threshold_ms=age_ns / 1e6,
+                affected_frames=b-a, first_command_ns=int(signal.times[0]),
+                feedback_topic=COMMAND_STATE[topic][0],
+                command_policy="joint_prefix_same_frame_feedback_only",
+                scope="retained_output" if alignment is not None else "candidate_before_alignment",
+                handling="initialize_joint_hold_target"))
+        for a, b in runs(~fresh):
+            issues.append(_issue("command_coverage_gap", "error", "Required recorded action command is absent or stale",
+                topic=topic, start_ns=int(output[a]), end_ns=int(output[b-1]),
+                start_seconds=float((output[a]-start)/1e9), end_seconds=float((output[b-1]-start)/1e9),
+                affected_frames=b-a, threshold_ms=None if age_ns is None else age_ns / 1e6,
+                command_policy="causal_hold_without_expiry" if age_ns is None else "causal_with_age_limit",
+                reason="no_prior_command" if indices[a] < 0 else "expired_command",
                 last_message_ns=int(signal.times[indices[a]]) if indices[a] >= 0 else None,
-                command_stream_empty=not len(signal.times), handling="current_aligned_state"))
-    for a, b in runs(command_counts == 0):
-        issues.append(_issue("command_coverage_gap", "error", "All arm/gripper commands are absent or stale",
-            start_ns=int(output[a]), end_ns=int(output[b-1]),
-            start_seconds=float((output[a]-start)/1e9), end_seconds=float((output[b-1]-start)/1e9),
-            affected_frames=b-a, handling="reject_recording"))
+                command_stream_empty=not len(signal.times), handling="reject_recording"))
     for topic, times in [*[(k, s.times) for k, s in signals.items()], ("video", video_times)]:
         if topic in COMMAND_STATE:
             continue
@@ -98,18 +109,52 @@ def timing_issues(signals, ranges, video_times, config, alignment=None):
     return issues
 
 
+def numeric_error(error):
+    details = {"exception_type": type(error).__name__}
+    if hasattr(error, "topics"):
+        details["topics"] = error.topics
+        if len(error.topics) == 1:
+            details["topic"] = error.topics[0]
+    return _issue(getattr(error, "code", "numeric_read_error"), "error", str(error), **details)
+
+
+def auxiliary_issues(bag):
+    """Optional topic counts are diagnostic metadata, never output requirements."""
+    try:
+        metadata = yaml.safe_load((Path(bag) / "data/metadata.yaml").read_text())["rosbag2_bagfile_information"]
+        counts = {row["topic_metadata"]["name"]: row["message_count"]
+                  for row in metadata.get("topics_with_message_count", [])}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, yaml.YAMLError):
+        # The numeric branch independently reports an unusable manifest.
+        return []
+    issues = [_issue("optional_topic_empty", "info", "Optional topic has no messages; not used for output alignment",
+                     topic=topic, handling="not_required_for_output")
+              for topic, count in counts.items() if count == 0 and topic not in TYPES]
+    if not counts.get("/tj/control/input_mode"):
+        issues.append(_issue("control_mode_snapshot_missing", "warning",
+            "Recorded input_mode is absent; control-source labels are not certified by this conversion",
+            topic="/tj/control/input_mode", handling="review_source_annotation",
+            alternative_status_topics=[k for k in ("/tj/dagger/status", "/tj/control/gripper_input_mode") if counts.get(k)]))
+    return issues
+
+
 def check_recording(bag, config, *, deep_video=True):
     """Inspect numeric and video branches independently; never change input files."""
     bag = Path(bag).resolve()
     started = time.monotonic()
-    issues, stages = [], []
+    issues, stages = auxiliary_issues(bag), []
     signals = ranges = video_times = paths = alignment = None
+    dagger_analysis=None
     media = {"full_decode": deep_video, "decoded_frames": None, "quad_size": None}
     try:
         signals, ranges, clocks, calibration = read_numeric(bag)
         stages.append("numeric_schema_values_clocks_calibration")
+        if config.processing_mode=='dagger':
+            from .dagger import analyze
+            dagger_analysis=analyze(signals,config)
+            stages.append('dagger_segmentation_and_annotation')
     except Exception as error:
-        issues.append(_issue("numeric_read_error", "error", str(error), exception_type=type(error).__name__))
+        issues.append(numeric_error(error))
     try:
         paths = video_files(bag)
         video_times = read_video_times(paths)
@@ -142,7 +187,7 @@ def check_recording(bag, config, *, deep_video=True):
     if signals is not None and video_times is not None:
         try:
             _, alignment = align(signals, ranges, video_times, config)
-            stages.append("alignment_state_fallback_and_stationary_trim")
+            stages.append("alignment_strict_commands_and_stationary_trim")
         except Exception as error:
             issues.append(_issue("alignment_error", "error", str(error), exception_type=type(error).__name__))
         try:
@@ -158,7 +203,7 @@ def check_recording(bag, config, *, deep_video=True):
     return {"bag": bag.name, "path": str(bag), "valid": valid,
             "frames": alignment["kept_frames"] if valid and alignment is not None else 0,
             "issues": issues, "completed_checks": stages, "video": media,
-            "alignment": alignment, "seconds": time.monotonic()-started}
+            "alignment": alignment, **({"dagger_analysis":dagger_analysis} if dagger_analysis is not None else {}), "seconds": time.monotonic()-started}
 
 
 def _check_job(job):

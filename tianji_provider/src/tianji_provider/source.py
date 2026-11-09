@@ -18,7 +18,7 @@ from .execution import iter_parallel
 from .media import CAMERAS, TianjiFrames, dimensions, image_statistics
 from .reader import bag_files, discover, read_numeric, read_video_times, video_files
 
-FORMAT = "tianji-thor-v4-fixed-gripper"
+FORMAT = "tianji-thor-v7-fixed-gripper"
 GENERATED = {"timestamp": "float32", "frame_index": "int64", "episode_index": "int64", "index": "int64", "task_index": "int64"}
 
 
@@ -39,7 +39,7 @@ def arrow_table(columns):
     return pa.table(arrays)
 
 
-def features(width, height, fps, codec="ppm", *, wrench_fps=200):
+def features(width, height, fps, codec="ppm", *, wrench_fps=200, dagger=False):
     joints = [*[f"left_joint_{i}_rad" for i in range(1, 8)], "left_gripper_normalized",
               *[f"right_joint_{i}_rad" for i in range(1, 8)], "right_gripper_normalized"]
     result = {
@@ -55,6 +55,9 @@ def features(width, height, fps, codec="ppm", *, wrench_fps=200):
         },
         "observation.eef": {"dtype": "float32", "shape": [14], "names": [f"{s}_{v}" for s in ("left_base_link", "right_base_link") for v in ("x_m", "y_m", "z_m", "qx", "qy", "qz", "qw")]},
     }
+    if dagger:
+        from .dagger import feature_schema
+        result.update(feature_schema())
     for key, dtype in GENERATED.items():
         result[key] = {"dtype": dtype, "shape": [1], "names": None}
     for camera in CAMERAS:
@@ -86,10 +89,11 @@ def _load_numeric_recording(job):
         physical = sum(p.stat().st_size for p in bag_files(bag / "data"))
         result.update(report=report, video_bytes=sum(p.stat().st_size for p in paths))
         retained = []
-        for grid, values, indices in segments:
+        for segment_index,(grid, values, indices) in enumerate(segments):
             length = len(grid)
-            _, windows = output_grids(report["intersection_start_ns"], report["intersection_end_ns"], config)
-            first = report["wrench_sampling"]["first_window_index"]
+            detail=report.get('segment_alignments',[report]*len(segments))[segment_index]
+            _, windows = output_grids(detail["intersection_start_ns"], detail["intersection_end_ns"], config)
+            first = detail["wrench_sampling"]["first_window_index"]
             windows = windows[first:first + length]
             audit = {"bag": str(bag), "absolute_time_ns": grid, "video_packet_index": indices,
                      "video_time_ns": vt[indices], "data_physical_bytes": physical,
@@ -157,7 +161,7 @@ class TianjiSource(DatasetSource):
                             ep.stats.update(image_stats[ep.index])
         assert expected_size is not None
         return self._finish(descriptors, rows, reports, audit,
-                            features(*expected_size, self.config.fps, wrench_fps=self.config.wrench_fps))
+                            features(*expected_size, self.config.fps, wrench_fps=self.config.wrench_fps, dagger=self.config.processing_mode=="dagger"))
 
     def _finish(self, descriptors, rows, reports, audit, schema):
         n = len(descriptors)
@@ -172,10 +176,15 @@ class TianjiSource(DatasetSource):
     def _load_prepared(self):
         manifest = json.loads((self.root / "tianji-cache.json").read_text())
         if manifest.get("format") != FORMAT:
-            raise ValueError("Unsupported Tianji cache version; rebuild from raw MCAP with control gripper actions and unfiltered wrench windows")
+            raise ValueError("Unsupported Tianji cache version; rebuild from raw MCAP with all four recorded action commands; feedback substitution caches are unsupported")
         semantic = asdict(self.config)
         semantic.pop("task")
-        if semantic != manifest["alignment_config"]:
+        stored=dict(manifest["alignment_config"])
+        if 'processing_mode' not in stored:
+            from .provider import TianjiConfig
+            defaults=asdict(TianjiConfig(task='cache compatibility'))
+            stored.update({k:v for k,v in defaults.items() if k.startswith('dagger_') or k=='processing_mode'})
+        if semantic != stored:
             raise ValueError("Prepared cache FPS/alignment options differ; run tianji-provider prepare with the requested options")
         descriptors, rows, audit = [], {}, {}
         for item in manifest["episodes"]:

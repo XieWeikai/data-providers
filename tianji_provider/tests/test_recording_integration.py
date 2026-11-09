@@ -67,9 +67,16 @@ def test_real_check_prepare_both_lerobot_versions(bag, tmp_path):
         indices = np.searchsorted(raw.times, points, side="right") - 1
         fresh = indices >= 0
         fresh[fresh] &= points[fresh] - raw.times[indices[fresh]] <= 150_000_000
-        expected = state[:, column].copy()
-        expected[fresh] = raw.values[indices[fresh], 0]
+        assert fresh.all(), "Every retained action must be a fresh recorded command"
+        expected = raw.values[indices, 0].astype(np.float32)
         np.testing.assert_array_equal(action[:, column], expected)
+
+    for topic,offset in (("/tj/control/joint_cmd_A",0),("/tj/control/joint_cmd_B",8)):
+        raw=measured[topic]
+        indices=np.searchsorted(raw.times,audit["absolute_time_ns"],side="right")-1
+        prefix=indices<0
+        np.testing.assert_array_equal(action[prefix,offset:offset+7],state[prefix,offset:offset+7])
+        np.testing.assert_array_equal(action[~prefix,offset:offset+7],raw.values[indices[~prefix]].astype(np.float32))
 
     cache = tmp_path / "prepared"
     manifest = prepare(bag, cache, config)

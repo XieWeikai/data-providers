@@ -192,7 +192,7 @@ def test_reader_uses_control_gripper_even_when_legacy_target_disagrees(tmp_path,
     for side in ("L", "R"):
         rows.append((NS(name="std_msgs/msg/Float32"), NS(topic=f"/info/gripper_target_{side}"),
                      NS(log_time=T0), NS(data=.99)))
-    monkeypatch.setattr(reader, "messages", lambda _: iter(rows))
+    monkeypatch.setattr(reader, "messages", lambda _, topics=None: iter(rows))
     signals, _, _, _ = reader.read_numeric(bag)
     for side in ("L", "R"):
         assert signals[f"/control/gripperValue{side}"].values[0, 0] == .5
@@ -206,12 +206,12 @@ def test_bad_control_gripper_is_not_hidden_by_fallback(tmp_path, monkeypatch, va
     for _, ch, _, msg in rows:
         if ch.topic == "/control/gripperValueL":
             msg.data = value
-    monkeypatch.setattr(reader, "messages", lambda _: iter(rows))
+    monkeypatch.setattr(reader, "messages", lambda _, topics=None: iter(rows))
     with pytest.raises(ValueError, match="normalized"):
         reader.read_numeric(bag)
 
 
-@pytest.mark.parametrize("version", ["tianji-thor-v1", "tianji-thor-v2", "tianji-thor-v3"])
+@pytest.mark.parametrize("version", ["tianji-thor-v1", "tianji-thor-v2", "tianji-thor-v3", "tianji-thor-v4"])
 def test_previous_cache_formats_require_raw_rebuild(tmp_path, version):
     (tmp_path / "tianji-cache.json").write_text(json.dumps({"format": version}))
     with pytest.raises(ValueError, match="rebuild from raw MCAP"):

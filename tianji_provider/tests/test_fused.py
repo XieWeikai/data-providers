@@ -16,7 +16,7 @@ from test_command_coverage import fixture, signal
 prepare_module = importlib.import_module("tianji_provider.prepare")
 
 
-def _fixture(tmp_path, monkeypatch, count=2, *, bad_numeric=(), changed_tail=(), sizes=None, empty_video=()):
+def _fixture(tmp_path, monkeypatch, count=2, *, bad_numeric=(), changed_tail=(), sizes=None, empty_video=(), late_joint=False):
     root = tmp_path / "raw"
     root.mkdir()
     bags = []
@@ -35,7 +35,9 @@ def _fixture(tmp_path, monkeypatch, count=2, *, bad_numeric=(), changed_tail=(),
         if index in bad_numeric:
             raise ValueError("broken numeric fixture")
         times, signals, ranges, _ = fixture()
-        signals["/tj/control/joint_cmd_B"] = signal(times, 7, .8)
+        signals["/tj/control/joint_cmd_B"] = signal(times[10:] if late_joint else times, 7, .8)
+        s=signals["/tj/control/joint_cmd_B"]
+        ranges["/tj/control/joint_cmd_B"]=[int(s.times[0]),int(s.times[-1]),len(s.times)]
         signals["/tj/joint_states"].values += index * .1
         return signals, ranges, {"test": "header"}, [[0, 1], [0, 1]]
     def timestamps(paths):
@@ -82,8 +84,9 @@ def _packets(path):
                 for packet in container.demux(stream) if packet.pts is not None]
 
 
-def test_fused_matches_separate_checks_arrays_audit_statistics_and_encoded_packets(tmp_path, monkeypatch):
-    root, bags, config, counts = _fixture(tmp_path, monkeypatch)
+@pytest.mark.parametrize("late_joint",[False,True])
+def test_fused_matches_separate_checks_arrays_audit_statistics_and_encoded_packets(tmp_path, monkeypatch, late_joint):
+    root, bags, config, counts = _fixture(tmp_path, monkeypatch, late_joint=late_joint)
     baseline_report = diagnostics.check_dataset(root, config, workers=1)
     baseline = tmp_path / "baseline"
     baseline_manifest = prepare_module.prepare(root, baseline, config, workers=1)

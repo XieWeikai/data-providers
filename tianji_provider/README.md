@@ -1,6 +1,6 @@
 # Tianji provider for LeTools
 
-本文描述 **tianji-provider 0.6.3**：读取 Thor / Tianji / Marvin Pro 的 ROS 2 MCAP 录制，将机器人信号和四路画面对齐，向 LeTools 提供 `DatasetSource`，由 LeTools 输出 LeRobot v2.1 / v3.0。Provider 不连接或控制机器人，读取源数据不需要 ROS 运行环境。0.6.3 将 NVENC 探测加强为四路同时编码，并允许 auto 在运行期间硬件编码失败时整批重试软件配方；保留 0.6.2 的调度和融合流水线，以及全部字段、采样、补命令、裁剪、检查阈值和精确统计。缓存格式仍为 `tianji-thor-v4`。
+本文描述 **tianji-provider 0.7.2**：读取 Thor / Tianji / Marvin Pro 的 ROS 2 MCAP 录制，将机器人信号和四路画面对齐，向 LeTools 提供 `DatasetSource`，由 LeTools 输出 LeRobot v2.1 / v3.0。Provider 不连接或控制机器人，读取源数据不需要 ROS 运行环境。四路最终动作指令必须存在，双臂首条指令前允许用同帧关节反馈初始化保持目标；辅助 topic 允许为空，不参与时间轴求交。缓存升级为 `tianji-thor-v7`，旧 v4/v5/v6 必须从原始录制重建。
 
 | 文档 | 内容 |
 |---|---|
@@ -22,16 +22,16 @@
 | 插件发现 | Python entry point 注册为 `tianji`；独立安装，不修改 LeTools 源码 | 指定 Python 环境 |
 | 数据读取 | 使用 MCAP 内嵌 ROS 2 schema，读取单条或一组录制 | 原始录制只读 |
 | 字段映射 | 重排关节、区分反馈和命令、按固定角度范围归一化夹爪、校验坐标系 | 生成的数据源表格 |
-| 时间对齐 | 观测/辅助 topic/视频取交集，四路 action 命令取有效覆盖并集，固定 FPS 输出 | 内存中的对齐结果 |
-| 命令补齐 | 某侧命令缺失、过期、晚开始、早结束或整段为空时，使用对应同帧 state | 输出 action，不回写 MCAP |
+| 时间对齐 | 仅必需观测与视频取交集，四路 action 各自逐帧检查有效性，固定 FPS 输出 | 内存中的对齐结果 |
+| 动作检查 | 四路指令必须存在；双臂前缀可初始化，夹爪缺失/过期拒绝 | 仅首条关节指令前允许反馈初始化，不回写 MCAP |
 | 静止裁剪 | 默认裁去首尾静止，保留中途暂停，一条录制一个 episode | 输出窗口，不删原始帧 |
 | `check` | 逐条检查数值、时钟、标定、对齐与完整视频，汇总异常 | 可选 JSON 报告 |
-| `inspect` | 查看对齐、补齐、裁剪结果、输出帧数和追溯摘要 | 可选 JSON 报告 |
+| `inspect` | 查看对齐、指令有效性、裁剪结果、输出帧数和追溯摘要 | 可选 JSON 报告 |
 | `prepare` | 写可复用的 Parquet、逐帧审计、四路 H.264 及统计 | 独立缓存目录 |
 | `check_and_prepare()` | 一次调用共享数值读取、对齐和完整视频帧流，执行全部检查并准备缓存；只提供 Python API / 配套 Web 入口 | 返回报告、选择记录及成功清单；写独立缓存目录 |
 | 直接转换 | 向 LeTools 提供无损 RGB PPM 帧序列，由 LeTools 编码 | 最终目录由 LeTools 写入 |
 | 缓存转换 | 缓存作为 DatasetSource，复用编码视频写出 v2.1/v3.0 | 最终目录由 LeTools 写入 |
-| 审计与性能描述 | 时间映射、补齐范围、大小/locality 描述、planner identity | 报告、缓存和元数据 |
+| 审计与性能描述 | 时间映射、严格动作策略、大小/locality 描述、planner identity | 报告、缓存和元数据 |
 
 本包没有原始 MCAP 编辑、自动删除异常录制、机器人控制、动作成功识别、训练或标注界面。Visualizer、Annotation、Doctor、可选 editor 属于其他工具；8095 是单独的 Web 项目。当前明确拒绝分布式执行，仅支持已验证的本地转换。
 
@@ -40,12 +40,12 @@
 ## 当前处理规则
 
 - Task 必填（独立 check 除外）。主 FPS 默认 50，`--wrench-fps` 默认 200；两者均为 1–1000 的整数，wrench-fps 必须不小于 FPS 且为其整数倍。默认力字段为 `observation.wrench_windows`，每行 `[4,12]`。
-- 四路 action 命令为 `/tj/control/joint_cmd_A/B`、`/control/gripperValueL/R`。每个保留时刻至少一路有效，其余填对应同帧 state；默认有效期为关节 100 ms、夹爪目标 150 ms，含阈值端点。
+- 四路 action 命令为 `/tj/control/joint_cmd_A/B`、`/control/gripperValueL/R`。每个保留时刻四路都必须有效，任何一路缺失或过期均拒绝；关节指令无消息间隔或有效期限制，持续沿用最近的真实目标；夹爪目标默认有效期 150 ms，含阈值端点。首条关节指令之前用同帧关节反馈作为保持目标，仅作info说明；整路为空仍拒绝。
 - Wrench 始终在独立高频网格取过去最近的真实测量，不滤波、不平均、不插值。每行包含 `N=wrench_fps/fps` 个从旧到新的采样，末点对齐该行时间戳；不再输出 `observation.wrench` 或 `observation.wrench_history`。
-- 真实观测缺口仍严格检查，默认最大间隔/视频帧年龄 100 ms。四路命令同时失效的保留时刻也会失败，不跨越缺口拼接。
+- 真实观测缺口仍严格检查，默认最大间隔/视频帧年龄 100 ms。任一路命令失效的保留时刻都会失败，不跨越缺口拼接。
 - 一条成功处理的录制对应一个 episode。只裁首尾，不拆轨迹，不删中间网格点，不修改输入。
 - Prepare 和融合 API 默认 `video_encoder="auto"`：独立探测 NVENC，成功后使用 H.264 NVENC / VBR CQ16 / p4 / HQ / Main；不可用时使用原 libx264 / CRF18 / veryfast。两者均为 yuv420p、无 B 帧、GOP=fps，保留原始单路尺寸和帧序列。LeTools 随后复用编码视频，不再有损编码。CQ 与 CRF 不是同一尺度。
-- 当前缓存格式 **`tianji-thor-v4`** 与目标 **LeRobot v3.0** 无关。旧 `tianji-thor-v1/v2/v3` 缓存必须从原始录制重新 prepare；旧视频即使已是 H.264，也不能复用旧时间轴缓存。已有最终 LeRobot 数据集不会被改写或删除。
+- 当前缓存格式 **`tianji-thor-v7`** 与目标 **LeRobot v3.0** 无关。旧 `tianji-thor-v1/v2/v3/v4/v5/v6` 缓存必须从原始录制重新 prepare；旧视频即使已是 H.264，也不能复用旧时间轴缓存。已有最终 LeRobot 数据集不会被改写或删除。
 
 ## 安装与注册
 
@@ -70,7 +70,7 @@ uv pip install --python "$TIANJI_ENV/bin/python" \
   'import tianji_provider; print(tianji_provider.__version__, tianji_provider.__file__)'
 ```
 
-新环境应先按 data-web-platform 部署说明安装完整 LeTools/native 依赖；不要为更新 provider 重建使用中的 `.venv`。**从 0.6.0 升级时新增了 opencv-python-headless，并要求 mcap-ros2-support>=0.5.7,<0.6；首次升级不要直接使用 --no-deps 跳过依赖。** 全部依赖已满足且只需重装当前包时才可加 `--no-deps`。确认发现的 `tianji` 版本为 0.6.2、模块路径为预期仓库；不要复制其他全局环境的 provider 配置进来。
+新环境应先按 data-web-platform 部署说明安装完整 LeTools/native 依赖；不要为更新 provider 重建使用中的 `.venv`。**从 0.6.0 升级时新增了 opencv-python-headless，并要求 mcap-ros2-support>=0.5.7,<0.6；首次升级不要直接使用 --no-deps 跳过依赖。** 全部依赖已满足且只需重装当前包时才可加 `--no-deps`。确认发现的 `tianji` 版本为 0.7.2、模块路径为预期仓库；不要复制其他全局环境的 provider 配置进来。
 
 NVENC 还依赖机器的 NVIDIA 驱动、硬件和当前 PyAV/FFmpeg 的编码器支持；仅在编码器名称列表中出现不代表能用。`auto` 通过独立进程同时打开四路编码器，实际编码、flush、解码和检查时间戳，探测失败时回退软件编码。共享 GPU 的资源可能随后改变，运行期间的硬件 codec 故障也可以触发一次整批软件重试。没有 NVIDIA 硬件也可使用本包，不要求为 provider 重装系统驱动。
 
@@ -120,7 +120,7 @@ recordings/
 | 输出字段 | 形状/顺序 | 来源与单位 |
 |---|---|---|
 | `observation.state` | float32[16]：左 7 关节、左夹爪、右 7 关节、右夹爪 | `/tj/joint_states`、`/info/gripper_feedback_L/R.data[0]`；rad、归一化电机行程 |
-| `observation.action` | float32[16]，与 state 对应 | A/B 左/右关节目标、`/control/gripperValueL/R`；无有效命令的分量补同帧 state |
+| `observation.action` | float32[16]，与 state 对应 | A/B 左/右关节目标、`/control/gripperValueL/R`；双臂首条前用同帧关节state初始化，之后用真实指令；夹爪用有效真实目标 |
 | `observation.wrench_windows` | float32[N,12]，N=wrench_fps/fps；第一轴时间从旧到新，第二轴左 Fx/Fy/Fz/Tx/Ty/Tz、右相同 | `/tj/info/wrench_left/right`；N、N·m；flange_L / flange_R；未滤波的过去最近测量 |
 | `observation.eef` | float32[14]：左 x/y/z/qx/qy/qz/qw、右相同 | `/tj/info/eef_left/right`；base_link 下的反馈 FK 位姿；m、单位四元数 |
 | `observation.image.head_left` | video[H/2,W/2,3] | 四宫格左上 |
@@ -135,7 +135,7 @@ recordings/
 
 字段保留用户指定的 `observation.action` 和单数 `observation.image`。训练代码若默认寻找 `action`、`observation.images`，需显式配置映射。
 
-关节按消息 `name` 重排，A 对应左臂、B 对应右臂。夹爪 action 使用 `/control/gripperValueL/R` 的归一化输入控制命令（Float32，0–1），不使用 `/info/gripper_target_L/R` 的驱动状态目标。输入命令不一定等于执行器最终采用的目标，这正是两类 topic 的语义区别。旧 `/info/gripper_target_L/R` 若仍被录制，仅作为辅助 topic 参与时钟与范围检查；不会被当作备用 action。控制命令缺失时补对应 state。
+关节按消息 `name` 重排，A 对应左臂、B 对应右臂。夹爪 action 使用 `/control/gripperValueL/R` 的归一化输入控制命令（Float32，0–1），不使用 `/info/gripper_target_L/R` 的驱动状态目标。输入命令不一定等于执行器最终采用的目标，这正是两类 topic 的语义区别。旧 `/info/gripper_target_L/R` 若仍被录制，仅作为辅助信息，不限制输出时间窗，也不作为备用 action。控制指令缺失或过期时拒绝该录制。
 
 夹爪按 `thor-v1` 驱动的固定电机角度范围归一化：左右均为 `[0.0,1.6]` rad，反馈为 `motor_rad / 1.6`；控制命令已经是 0–1，不再次换算。常量集中在 `reader.GRIPPER_CALIBRATION`，实际使用值继续写入报告的 `gripper_calibration`。不需要录制或读取 `/info/web_gripper`，旧录制中的该 topic 也会忽略。反馈轻微越出 0–1 不裁剪；归一化值不是毫米开口宽度。更换夹爪或调整驱动角度范围时，必须同步修改该常量。固定映射使用新的 prepare 缓存格式，旧缓存需从原始 MCAP 重新 prepare。
 
@@ -154,7 +154,7 @@ TIANJI_REPORT=/path/to/reports/check.json
 TIANJI_TASK='Pick and place'
 TIANJI_ARGS=(--task "$TIANJI_TASK" --fps 50 --wrench-fps 200
   --gap-policy error --max-gap-ms 100
-  --command-max-age-ms 100 --gripper-max-gap-ms 150
+  --gripper-max-gap-ms 150
   --state-resampling lowpass --trim-stationary
   --motion-joint-threshold-rad 0.002 --motion-gripper-threshold 0.01)
 
@@ -222,7 +222,7 @@ tianji-provider inspect /path/to/recordings \
 
 Check 可省略 task，配置中使用占位值 `validation`，不会生成训练数据集。`--no-deep-video` 只验证时间戳和首帧，不证明后续视频完整。Check 在一条失败后继续扫描其余轨迹。
 
-Inspect 解析数值、读取视频时间戳和首帧，计算输出帧数、裁剪、补齐范围和视频最大年龄；不编码、不完整解码视频、不计算全部图像统计。它遇到错误会停止，不能替代 check 的逐条汇总。
+Inspect 解析数值、读取视频时间戳和首帧，计算输出帧数、裁剪、指令有效性和视频最大年龄；不编码、不完整解码视频、不计算全部图像统计。它遇到错误会停止，不能替代 check 的逐条汇总。
 
 ### 直接从 MCAP 转换
 
@@ -247,7 +247,7 @@ letools convert /path/to/recordings /path/to/new-lerobot-v21 \
 cache/
 ├── tianji-cache.json          # 所有步骤成功后最后写入的完成清单
 ├── episode_000000/
-│   ├── data.parquet           # 已对齐、补齐、裁剪的表格
+│   ├── data.parquet           # 已严格对齐、检查动作、裁剪的表格
 │   ├── alignment.npz          # 主帧/力网格/实际力样本绝对时间，以及视频索引和时间
 │   ├── head_left.mp4
 │   ├── head_right.mp4
@@ -258,7 +258,7 @@ cache/
 
 缓存是 provider 中间格式，不是最终 LeRobot。清单记录配置、源指纹、字段、episode 路径、统计、对齐报告、编码设置及分阶段耗时。复用要求：
 
-1. 格式为当前 `tianji-thor-v4`。
+1. 格式为当前 `tianji-thor-v7`。
 2. 除 task 外的 `TianjiConfig` 完全一致；即使某参数本次未实际影响输出，也参与比较。
 3. 再次对原始目录执行 prepare 时，MCAP 路径、大小、修改时间指纹一致，引用资源存在。指纹不是内容哈希。
 4. `prepare` 还核对清单中的编码配方：`auto` 只接受本包已验证的 libx264 CRF18 配方或当前 NVENC CQ16/Main 配方；显式编码器请求必须匹配对应配方。旧软件清单没有 `options` 字典仍可按既有质量字段识别，其他 CQ/profile/配方不能借 auto 绕过检查。
@@ -299,4 +299,7 @@ Check 默认按录制并行，但逐条结果、跨录制尺寸校验和进度�
 python -m pytest -q tianji_provider/tests
 ```
 
-自带测试覆盖命令空流与错开边界、阈值、全路缺口、观测缺失、首尾裁剪、坏命令、旧缓存拒绝、多速率力窗口、嵌套 Parquet、编译解码差分、并行顺序/取消/崩溃与精确像素统计，也覆盖编码器探测/配方匹配、融合诊断等价、有效子集重编号和失败不发布清单。真实 MCAP 集成测试通过环境变量显式启用，命令见 [验证记录](VALIDATION.md)。历史脚本、旧测试和大体积产物不随仓库分发。0.6.0 曾改变字段和采样语义；0.6.2 保持数值与信号规则，v4 缓存兼容性按本页语义配置、资源和编码配方规则判断。
+自带测试覆盖命令空流与错开边界、阈值、全路缺口、观测缺失、首尾裁剪、坏命令、旧缓存拒绝、多速率力窗口、嵌套 Parquet、编译解码差分、并行顺序/取消/崩溃与精确像素统计，也覆盖编码器探测/配方匹配、融合诊断等价、有效子集重编号和失败不发布清单。真实 MCAP 集成测试通过环境变量显式启用，命令见 [验证记录](VALIDATION.md)。历史脚本、旧测试和大体积产物不随仓库分发。0.6.0 曾改变字段和采样语义；0.7.0 改为四路真实指令，0.7.1 取消双臂关节指令有效期；v6 缓存兼容性按本页语义配置、资源和编码配方规则判断。
+
+
+0.7.2 更新：取消双臂首条指令前缀导致质检失败的规则，仅此区间允许同帧关节反馈初始化保持目标，记录 joint_command_prefix_initialized（info）和 joint_prefix_initialization；不改变轨迹边界和帧数。新缓存格式为 `tianji-thor-v7`。

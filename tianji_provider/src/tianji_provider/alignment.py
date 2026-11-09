@@ -1,4 +1,4 @@
-"""One complete episode per recording, with state targets during command pauses."""
+"""One complete episode with strict observations and four recorded action streams."""
 
 from fractions import Fraction
 
@@ -58,11 +58,17 @@ COMMAND_STATE = {
     "/control/gripperValueL": ("/info/gripper_feedback_L", slice(None)),
     "/control/gripperValueR": ("/info/gripper_feedback_R", slice(None)),
 }
+# Feedback may initialize joint targets only before their first recorded command.
+JOINT_COMMAND_TOPICS = ("/tj/control/joint_cmd_A", "/tj/control/joint_cmd_B")
 FEEDBACK_TOPICS = ("/tj/joint_states", "/info/gripper_feedback_L", "/info/gripper_feedback_R")
 WRENCH_TOPICS = ("/tj/info/wrench_left", "/tj/info/wrench_right")
+OBSERVATION_TOPICS = (*FEEDBACK_TOPICS, "/tj/info/eef_left", "/tj/info/eef_right", *WRENCH_TOPICS)
 
 
 def command_age_ns(topic, config):
+    # Joint targets persist until replaced; recording gaps do not expire them.
+    if topic in JOINT_COMMAND_TOPICS:
+        return None
     age = config.gripper_max_gap_ms if topic.startswith("/control/gripperValue") else config.command_max_age_ms
     return round(age * 1e6)
 
@@ -71,30 +77,32 @@ def command_samples(signal, grid, max_age_ns):
     """Causal lookup independent of a command stream's first/last timestamp.
 
     Empty streams and times before the first command have no usable sample.
-    The last command remains valid through its inclusive age limit only.
+    None disables expiry; an explicit age limit remains inclusive.
     """
     indices = np.searchsorted(signal.times, grid, side="right") - 1
-    fresh = np.zeros(len(grid), dtype=bool)
-    present = indices >= 0
-    fresh[present] = grid[present] - signal.times[indices[present]] <= max_age_ns
-    return indices, fresh
+    valid = indices >= 0
+    if max_age_ns is not None:
+        valid[valid] = grid[valid] - signal.times[indices[valid]] <= max_age_ns
+    return indices, valid
+
+
+def command_coverage(signal, grid, max_age_ns, topic):
+    """Allow same-frame feedback initialization for nonempty joint prefixes."""
+    indices, valid = command_samples(signal, grid, max_age_ns)
+    prefix = (indices < 0) if topic in JOINT_COMMAND_TOPICS and len(signal.times) else np.zeros(len(grid), dtype=bool)
+    return indices, valid | prefix, prefix
 
 
 def candidate_interval(signals, ranges, video_times, config):
-    """Intersect observations with the envelope of the command union.
+    """Intersect required observations/video only; commands cannot hide gaps.
 
-    Interior holes in that union are checked on retained samples by align;
-    they never silently split episodes or remove individual rows.
+    Calibration, source status and event topics do not define sampling bounds.
+    Command coverage is checked independently at every retained output point.
     """
-    observations = [v for k, v in ranges.items() if k not in COMMAND_STATE]
-    observations.append([int(video_times[0]), int(video_times[-1]), len(video_times)])
-    commands = [(int(signals[k].times[0]), int(signals[k].times[-1]) + command_age_ns(k, config))
-                for k in COMMAND_STATE if len(signals[k].times)]
-    if not commands:
-        raise ValueError("No recorded control command: at least one arm/gripper command topic is required")
-    start = max(max(v[0] for v in observations), min(v[0] for v in commands))
-    end = min(min(v[1] for v in observations), max(v[1] for v in commands))
-    return start, end
+    observations = [(int(signals[k].times[0]), int(signals[k].times[-1]))
+                    for k in OBSERVATION_TOPICS]
+    observations.append((int(video_times[0]), int(video_times[-1])))
+    return max(v[0] for v in observations), min(v[1] for v in observations)
 
 
 def moving_bounds(times, feedback, joint_threshold, gripper_threshold):
@@ -118,17 +126,18 @@ def moving_bounds(times, feedback, joint_threshold, gripper_threshold):
     return a, b
 
 
-def command_or_state(signal, grid, aligned_state, max_age_ns):
-    """Use causal commands while fresh, otherwise target the current feedback.
-
-    A paused teleoperation arm must not inherit an old, potentially unachieved
-    target. Each arm/gripper falls back independently, and a new command takes
-    effect at its timestamp. Missing command packets never remove output rows.
-    """
-    indices, fresh = command_samples(signal, grid, max_age_ns)
-    values = aligned_state.copy()
-    values[fresh] = signal.values[indices[fresh]]
-    return values, ~fresh
+def command_targets(signal, grid, max_age_ns, topic, *, prefix_values=None):
+    """Initialize a joint prefix from aligned feedback, then hold real targets."""
+    indices, valid, prefix = command_coverage(signal, grid, max_age_ns, topic)
+    if not valid.all():
+        raise ValueError(f"Required action command missing/stale: {topic}, {int(np.sum(~valid))} frames")
+    if prefix.any() and (prefix_values is None or prefix_values.shape != (len(grid), signal.values.shape[1])):
+        raise ValueError(f"Joint command prefix requires matching aligned feedback: {topic}")
+    targets = np.empty((len(grid), signal.values.shape[1]), dtype=signal.values.dtype)
+    targets[~prefix] = signal.values[indices[~prefix]]
+    if prefix.any():
+        targets[prefix] = prefix_values[prefix]
+    return targets
 
 
 def interpolate(times, values, grid, fps, max_gap_ns, mode="lowpass"):
@@ -186,9 +195,14 @@ def pose_interpolate(signal, grid, fps, max_gap_ns, mode):
     return np.column_stack((xyz, quat * signs[:, None]))
 
 
-def align(signals, ranges, video_times, config):
+def _align_contiguous(signals, ranges, video_times, config, *, bounds=None, grid_only=False):
+    missing = [k for k in COMMAND_STATE if k not in signals or not len(signals[k].times)]
+    if missing:
+        raise ValueError(f"Required action command has no messages: {missing}")
     ranges = {**ranges, "video": [int(video_times[0]), int(video_times[-1]), len(video_times)]}
     start, end = candidate_interval(signals, ranges, video_times, config)
+    if bounds is not None:
+        start,end=max(start,int(bounds[0])),min(end,int(bounds[1]))
     grid, wrench_grid = output_grids(start, end, config)
     if len(grid) < 2:
         raise ValueError("The common interval must contain at least two output frames")
@@ -226,42 +240,45 @@ def align(signals, ranges, video_times, config):
     if failures:
         raise ValueError(f"Missing observations exceed --max-gap-ms={config.max_gap_ms:g}; "
                          f"refusing to split, drop frames or invent feedback: {failures}")
-    command_counts = sum(command_samples(signals[k], grid, command_age_ns(k, config))[1].astype(np.int8)
-                         for k in COMMAND_STATE)
-    if np.any(command_counts == 0):
-        raise ValueError(f"No fresh control command at {int(np.sum(command_counts == 0))} output frames; "
-                         "at least one arm/gripper command topic is required at each retained time; "
-                         "refusing to split or drop frames")
-    resampled = {k: v[trim_start:trim_stop] for k, v in feedback_values.items()}
-    for topic, s in signals.items():
-        if topic in COMMAND_STATE or topic in resampled:
-            continue
-        if topic in WRENCH_TOPICS:
-            # Preserve actual measured values: no FIR, average, or interpolation.
-            # Validity was checked at EVERY high-rate point, not only row anchors.
-            value = s.values[previous_indices(s.times, wrench_grid.ravel())].reshape(*wrench_grid.shape, 6)
-        elif "/eef_" in topic:
-            value = pose_interpolate(s, grid, config.fps, round(config.max_gap_ms * 1e6), config.state_resampling)
-        else:
-            value = interpolate(s.times, s.values, grid, config.fps, round(config.max_gap_ms * 1e6), config.state_resampling)
-        resampled[topic] = value
-    fallback_counts, fallback_ranges = {}, {}
-    for topic, (state_topic, columns) in COMMAND_STATE.items():
-        resampled[topic], fallback = command_or_state(
-            signals[topic], grid, resampled[state_topic][:, columns], command_age_ns(topic, config))
-        fallback_counts[topic] = int(np.sum(fallback))
-        fallback_ranges[topic] = [{"start_ns": int(grid[a]), "end_ns": int(grid[b-1]), "frames": b-a}
-                                  for a, b in runs(fallback)]
-    r = resampled
-    columns = {
-        "observation.state": np.column_stack((r["/tj/joint_states"][:, :7], r["/info/gripper_feedback_L"],
-                                                r["/tj/joint_states"][:, 7:], r["/info/gripper_feedback_R"])),
-        "observation.action": np.column_stack((r["/tj/control/joint_cmd_A"], r["/control/gripperValueL"],
-                                                 r["/tj/control/joint_cmd_B"], r["/control/gripperValueR"])),
-        "observation.wrench_windows": np.concatenate((r[WRENCH_TOPICS[0]], r[WRENCH_TOPICS[1]]), axis=2),
-        "observation.eef": np.column_stack((r["/tj/info/eef_left"], r["/tj/info/eef_right"])),
-    }
-    result = [(grid, {k: v.astype(np.float32) for k, v in columns.items()}, video_indices)]
+    if grid_only:
+        # Source/command eligibility is resolved before constructing training actions.
+        result = [(grid, {}, video_indices)]
+    else:
+        command_valid = {k: command_coverage(signals[k], grid, command_age_ns(k, config), k)[1]
+                         for k in COMMAND_STATE}
+        command_failures = {k: int(np.sum(~valid)) for k, valid in command_valid.items() if not valid.all()}
+        if command_failures:
+            raise ValueError(f"Required action commands missing/stale at output frames: {command_failures}; "
+                             "joint prefixes use aligned feedback and later targets do not expire; gripper targets must be fresh; "
+                             "refusing whole-stream substitution or dropped frames")
+        resampled = {k: v[trim_start:trim_stop] for k, v in feedback_values.items()}
+        for topic, s in signals.items():
+            if topic in COMMAND_STATE or topic in resampled:
+                continue
+            if topic in WRENCH_TOPICS:
+                # Preserve actual measured values: no FIR, average, or interpolation.
+                # Validity was checked at EVERY high-rate point, not only row anchors.
+                value = s.values[previous_indices(s.times, wrench_grid.ravel())].reshape(*wrench_grid.shape, 6)
+            elif "/eef_" in topic:
+                value = pose_interpolate(s, grid, config.fps, round(config.max_gap_ms * 1e6), config.state_resampling)
+            else:
+                value = interpolate(s.times, s.values, grid, config.fps, round(config.max_gap_ms * 1e6), config.state_resampling)
+            resampled[topic] = value
+        for topic in COMMAND_STATE:
+            feedback_topic, joints = COMMAND_STATE[topic]
+            initial = resampled[feedback_topic][:, joints] if topic in JOINT_COMMAND_TOPICS else None
+            resampled[topic] = command_targets(signals[topic], grid, command_age_ns(topic, config), topic,
+                                               prefix_values=initial)
+        r = resampled
+        columns = {
+            "observation.state": np.column_stack((r["/tj/joint_states"][:, :7], r["/info/gripper_feedback_L"],
+                                                    r["/tj/joint_states"][:, 7:], r["/info/gripper_feedback_R"])),
+            "observation.action": np.column_stack((r["/tj/control/joint_cmd_A"], r["/control/gripperValueL"],
+                                                     r["/tj/control/joint_cmd_B"], r["/control/gripperValueR"])),
+            "observation.wrench_windows": np.concatenate((r[WRENCH_TOPICS[0]], r[WRENCH_TOPICS[1]]), axis=2),
+            "observation.eef": np.column_stack((r["/tj/info/eef_left"], r["/tj/info/eef_right"])),
+        }
+        result = [(grid, {k: v.astype(np.float32) for k, v in columns.items()}, video_indices)]
     report = {
         "intersection_start_ns": int(start), "intersection_end_ns": int(end),
         "grid_frames": len(original_grid), "kept_frames": len(grid), "dropped_frames": 0,
@@ -284,11 +301,67 @@ def align(signals, ranges, video_times, config):
             "max_sample_age_ms": {k: float(np.max(wrench_grid.ravel() - signals[k].times[
                 previous_indices(signals[k].times, wrench_grid.ravel())]) / 1e6) for k in WRENCH_TOPICS},
         },
-        "command_fallback_policy": "current_aligned_state",
-        "command_coverage_policy": "at_least_one_fresh_command",
-        "minimum_fresh_command_topics": int(command_counts.min()),
-        "empty_command_topics": [k for k in COMMAND_STATE if not len(signals[k].times)],
-        "command_fallback_frames": fallback_counts, "command_fallback_ranges": fallback_ranges,
+        "command_policy": "all_four_recorded_commands_required",
+        "command_fallback_policy": "joint_prefix_same_frame_feedback_only",
+        "command_coverage_policy": "joint_prefix_initialized_then_hold_gripper_fresh",
+        "joint_prefix_initialization": {
+            k: {"frames": int(np.sum(grid < signals[k].times[0])),
+                "start_ns": int(grid[0]),
+                "end_ns": int(grid[grid < signals[k].times[0]][-1]),
+                "first_command_ns": int(signals[k].times[0]),
+                "feedback_topic": COMMAND_STATE[k][0],
+                "policy": "same_frame_joint_feedback_hold_target"}
+            for k in JOINT_COMMAND_TOPICS if np.any(grid < signals[k].times[0])},
+        "command_max_age_ms_by_topic": {k: None if command_age_ns(k, config) is None
+                                       else command_age_ns(k, config) / 1e6 for k in COMMAND_STATE},
+        "minimum_valid_command_topics": 4,
         "video_max_age_ms": float(np.max(grid - video_times[video_indices]) / 1e6),
     }
     return result, report
+
+
+def align(signals, ranges, video_times, config):
+    if getattr(config, 'processing_mode', 'standard') != 'dagger':
+        return _align_contiguous(signals,ranges,video_times,config)
+    from dataclasses import replace
+    from .dagger import analyze, annotations, review_summary
+    analysis=analyze(signals,config)
+    segments,report=_align_contiguous(signals,ranges,video_times,config,grid_only=config.dagger_export=='expert_segments')
+    (grid,values,indices),=segments
+    marks=annotations(signals,grid,config,analysis)
+    analysis['supervision_eligibility']={'frames':len(grid),
+        'component_valid_frames':[int(marks['dagger.action_valid'][:,i].sum()) for i in (0,7,8,15)],
+        'full_supervision_frames':int(marks['dagger.supervision_valid'].sum())}
+    report['dagger_analysis']=analysis
+    report['dagger_review']=review_summary(analysis,config)
+    report['dagger_supervision_frames']=int(marks['dagger.supervision_valid'].sum())
+    if config.dagger_export=='annotate':
+        values.update(marks)
+        report['dagger_training_contract']='annotation_only_requires_explicit_training_filter'
+        return segments,report
+    selected=[];child_reports=[];selection=[]
+    size=config.wrench_fps//config.fps
+    # Reconstruct each selected contiguous region separately. Use linear state
+    # reconstruction here so an FIR cannot blend across an excluded boundary.
+    segment_config=replace(config,trim_stationary=False,state_resampling='linear')
+    for a,b in runs(marks['dagger.supervision_valid'][:,0]):
+        if b-a<config.dagger_min_segment_frames: continue
+        start=int(grid[a])-round((size-1)*1e9/config.wrench_fps)
+        end=int(grid[b-1])
+        child,detail=_align_contiguous(signals,ranges,video_times,segment_config,bounds=(start,end))
+        (cg,cv,ci),=child
+        cm=annotations(signals,cg,config,analysis)
+        if not cm['dagger.supervision_valid'].all():
+            raise ValueError('Reconstructed expert segment crosses an invalid action boundary')
+        cv.update(cm);selected.append((cg,cv,ci));child_reports.append(detail)
+        selection.append({'start_ns':int(cg[0]),'end_ns':int(cg[-1]),'frames':len(cg),
+                          'source_start_frame':a,'source_stop_frame':b})
+    if not selected:
+        counts=analysis['supervision_eligibility']['component_valid_frames']
+        raise ValueError(f'No continuous fully supervised expert segment: valid frames [left arm, left gripper, right arm, right gripper]={counts}; prior-source held targets cannot become expert labels')
+    report.update(kept_frames=sum(len(s[0]) for s in selected),segments=selection,
+                  segment_alignments=child_reports,
+                  dagger_excluded_frames=len(grid)-sum(len(s[0]) for s in selected),
+                  dagger_training_contract='physically_separated_expert_episodes_no_invalid_targets')
+    report['dagger_supervision_frames']=report['kept_frames']
+    return selected,report

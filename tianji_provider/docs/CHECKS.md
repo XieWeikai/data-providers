@@ -1,4 +1,4 @@
-# 检查、报错与转换拦截（0.6.3）
+# 检查、报错与转换拦截（0.7.2）
 
 [返回使用手册](../README.md) · [参数详解](PARAMETERS.md) · [内部设计](DESIGN.md)
 
@@ -10,7 +10,7 @@
 |---|---|---|
 | `error` | 无法满足当前读取、对齐或视频契约 | `valid=false` |
 | `warning` | 需要注意，但该项未影响必须支持的输出点 | 不单独使 valid=false |
-| `info` | 记录正常处理，例如 state 补 action、首尾裁剪 | 不单独使 valid=false |
+| `info` | 记录正常处理，例如辅助通道为空、首尾裁剪 | 不单独使 valid=false |
 
 Check 会检查所有可识别录制。每条先分别尝试数值读取和视频时间戳读取，深度模式还完整解码视频；两路都可用才尝试对齐和缺口分析。普通录制数据错误不阻止其余录制检查，结果按目录顺序发布；并行 worker 崩溃等基础设施错误会终止整条命令，不伪装为检查通过或继续挂起。读取失败的分支不会假装完成后续检查，实际范围见 `completed_checks`。
 
@@ -25,7 +25,7 @@ Check 会检查所有可识别录制。每条先分别尝试数值读取和视�
 | 项目 | 失败条件 | code / 典型消息 |
 |---|---|---|
 | 数据文件与清单 | metadata 无法解析、引用 MCAP 不存在或路径越界、数值消息不能解码 | `numeric_read_error` / 文件错误、`Missing or unsafe MCAP path` |
-| 必需观测/辅助 topic | 必需反馈等没有消息，或 metadata 中声明了空的非豁免 topic | `numeric_read_error` / `empty or non-finite signal`、`cannot intersect empty recorded topics` |
+| 必需观测/动作 | 必需训练信号无实际消息；四路动作任何一路为空都拒绝 | `required_signal_missing` / `required_command_missing`，带 topics 列表 |
 | Schema 与维度 | 消息类型错误，关节反馈不是约定的 14 个命名关节，关节命令不是 7 维，夹爪反馈不是 5 项 | `numeric_read_error` / `expected ...` |
 | 数值与目标范围 | 用于输出的数值含 NaN/Inf；夹爪目标不在 [0,1] | `numeric_read_error` / `non-finite signal`、`target must be normalized to [0, 1]` |
 | 夹爪角度映射 | 左右固定使用 `[0.0,1.6]` rad，反馈除以 1.6；不依赖 `/info/web_gripper` | 不再报告该 topic 的标定缺失、JSON/单位错误或中途变化；反馈自身的数值与时间检查仍保留 |
@@ -39,8 +39,8 @@ Check 会检查所有可识别录制。每条先分别尝试数值读取和视�
 | 时间交集 | 无共同候选区间，或候选网格不足两点 | `alignment_error`，也可能有 `timeline_error` / `no common time interval`、`at least two output frames` |
 | 观测缺口 | 超过 max_gap_ms 的观测间隔影响所需网格点；wrench 包括窗口内所有高频点 | `observation_gap` 和通常伴随的 `alignment_error` |
 | 视频过旧 | 输出点距过去最近视频帧超过 max_gap_ms | `video_gap` 和通常伴随的 `alignment_error` |
-| 命令覆盖 | 保留区间存在四路命令同时无效的点 | `command_coverage_gap` 和通常伴随的 `alignment_error` |
-| 四路命令全空 | 完全没有可构建命令覆盖范围的消息 | `alignment_error` / `No recorded control command`，也可能有 `timeline_error`；此时尚无输出网格，不一定产生 command_coverage_gap |
+| 命令覆盖 | 夹爪指令缺失或过期；双臂首条前的反馈初始化只记info，已有目标不因消息间隔过期 | `command_coverage_gap` 和通常伴随的 `alignment_error` |
+| 指令空流 | 任意一路没有真实消息 | `required_command_missing`；直接 align 调用则为 `Required action command has no messages` |
 | EEF 姿态 | 四元数模长与 1 的偏差超过 0.01，或旋转插值无法完成 | `alignment_error` / `EEF orientation is not a unit quaternion` 等 |
 | 静止裁剪 | 开启时整条无超阈值运动，或裁剪后不足两点 | `alignment_error` / `No motion exceeds ...`、`Motion interval contains fewer than two output frames` |
 | 其他时间线计算 | 结构化缺口分析本身无法完成 | `timeline_error`，查看 message 中原始原因 |
@@ -51,13 +51,14 @@ Check 会检查所有可识别录制。每条先分别尝试数值读取和视�
 
 关节与夹爪反馈的“所需”范围包含首尾裁剪前窗口，不能把没测到的首尾当成静止删掉。成功确定输出窗口后，其他观测与视频按保留点判断。对齐先失败时，缺口分析可能使用完整候选网格提供排查信息，应结合 alignment_error 理解范围。
 
-NaN 校验针对被提取到输出中的数值；不是对所有辅助消息的所有字段做通用质量检查。夹爪 action 及其空流豁免已改为 `/control/gripperValueL/R`。`/info/gripper_target_L/R` 不作为备用控制源；若仍被录制，和其他辅助 topic 一样检查时钟及范围。空命令豁免只适用于四路 action 命令，不等于任意名为 control 的 topic 都能豁免。
+NaN 校验针对被提取到输出中的数值；不是对所有辅助消息的所有字段做通用质量检查。夹爪 action 固定使用 `/control/gripperValueL/R`，四路指令没有空流豁免。`/info/gripper_target_L/R` 不作为备用控制源。辅助 topic 为空记录 optional_topic_empty，不限制输出时间窗。input_mode 未记录单独给出 control_mode_snapshot_missing 警告，当前转换不认证 DAgger/控制源标签。
 
 ## 不阻止转换的处理记录
 
 | code | 等级 | 含义 |
 |---|---|---|
-| `command_pause_filled` | info | 该侧 action 在指定输出范围将用同帧 state；包括整段空命令、尚未开始、过期 |
+| `optional_topic_empty` | info | 未使用的辅助通道没有消息，不参与对齐 |
+| `control_mode_snapshot_missing` | warning | 缺少控制模式记录，需复核控制源标注 |
 | `stationary_edges_trimmed` | info | 输出首尾静止部分被裁去，中途网格不删除 |
 | `observation_gap` / `video_gap` | warning | 检出的超阈值间隔不影响该信号所需采样点 |
 
@@ -69,7 +70,7 @@ NaN 校验针对被提取到输出中的数值；不是对所有辅助消息的�
 
 缺口明细的 `affected_frames` 是受影响的主行数，`affected_samples` 是受影响的采样点数；wrench 一行可有多个坏点。`sampling_fps` 为 wrench-fps 或普通字段的 fps，首末受影响时间对于 wrench 是窗口内部的高频时间点。
 
-缺口明细包含 topic、绝对纳秒起止、相对候选起点秒数、实际 gap_ms、阈值、affected_frames、首末受影响输出点及处理方式。命令补齐包含补齐范围/帧数，`last_message_ns=null` 表示此前没有消息，`command_stream_empty=true` 表示该流整段为空。
+缺口明细包含 topic、绝对纳秒起止、相对候选起点秒数、实际 gap_ms、阈值、affected_frames、首末受影响输出点及处理方式。命令缺口包含对应 topic、受影响范围/帧数，`last_message_ns=null` 表示此前没有消息，`command_stream_empty=true` 表示该流整段为空。
 
 一个反馈缺口可能同时产生 `alignment_error`（整体失败）与左右两条 `observation_gap`（详细定位），不是三个独立事故。失败轨迹的 `frames=0` 表示没有可接受输出，不代表原始视频为空。报告只覆盖当次数据、版本和参数，修改 FPS/阈值/裁剪后必须重查。
 
@@ -81,7 +82,7 @@ NaN 校验针对被提取到输出中的数值；不是对所有辅助消息的�
 
 | 调用方式或失败 | 报告与产物 | 后续行为 |
 |---|---|---|
-| 默认 `prepare_valid_only=False`，全部通过 | 完整报告 valid=True，写 v4 成功清单 | 可从缓存继续 LeTools 转换 |
+| 默认 `prepare_valid_only=False`，全部通过 | 完整报告 valid=True，写 v5 成功清单 | 可从缓存继续 LeTools 转换 |
 | 默认模式，至少一条数据 error | 完整报告 valid=False，返回 manifest=None，不写成功清单 | 整批不进入最终转换；可能保留部分未完成视频/准备文件 |
 | 显式 `prepare_valid_only=True`，部分通过 | 完整报告仍 valid=False，只给通过项生成成功缓存，拒绝项目仍完整记录 | 调用者明确选择有效子集；不是放宽检查，也不删原始失败数据 |
 | 显式有效子集模式，全部失败 | 完整报告，manifest=None | 没有可转换的缓存 |
@@ -115,7 +116,7 @@ LeTools 自己另有目标数据集验证，当前 deep validation 检查 episod
 
 ## 常见问题定位
 
-- 单侧没动、整段无命令：当前版本仍可用 state 补齐；0.6.2 未修改这条规则。仍出现旧的空 A/B 命令错误，应核对实际环境版本与进程，而不是删除录制。
+- 单侧没动、整段无命令：0.7.1 会拒绝；静止一侧也必须由采集端记录真实保持目标。不要用反馈推测缺失指令。
 - 100.85 ms 夹爪反馈缺口：默认 100 ms 阈值下会失败；改夹爪**命令**阈值无效。命令和观测是两类信号。
 - 全静止轨迹失败：先看是否为运动阈值/裁剪条件，不一定是文件损坏；若需要静止示例可关闭 trim 后重新检查。
 - 一条失败有多项错误：先看结构性读取错误；后续 alignment/timeline 可能尚无法完成，不能据此声称其他数值分支都已验证。
@@ -123,3 +124,6 @@ LeTools 自己另有目标数据集验证，当前 deep validation 检查 episod
 - 想保留现有数据：check 不删除数据；错误不是自动删除建议。原始数据和旧最终数据集不会因本工具的诊断结果被移除。
 - 看到缓存里有视频但没有 tianji-cache.json：融合可能在检查期间准备过其他录制，文件存在不代表整批通过；查看返回报告或运行错误，不能自行补一个清单绕过失败。
 - 只点过一次“仅检查”再正式转换：旧报告不会自动成为复用缓存，正式转换仍重新检查；融合只共享本次调用内部的读取和解码。
+
+
+0.7.2 更新：取消双臂首条指令前缀导致质检失败的规则，仅此区间允许同帧关节反馈初始化保持目标，记录 joint_command_prefix_initialized（info）和 joint_prefix_initialization；不改变轨迹边界和帧数。新缓存格式为 `tianji-thor-v7`。

@@ -2,13 +2,14 @@
 
 from dataclasses import dataclass
 from pathlib import Path
+import json
 import struct
 
 import numpy as np
 import yaml
 from mcap.reader import make_reader
 
-# Only action-producing command streams may be empty; observations stay strict.
+# Output observations and all four final action streams are required.
 from .alignment import COMMAND_STATE
 from .decoder import CompiledDecoderFactory
 
@@ -93,19 +94,60 @@ def normalize_signal(times, values, topic):
     return Signal(t[keep], v[keep])
 
 
+class RequiredSignalMissing(ValueError):
+    def __init__(self, topics):
+        self.topics = list(topics)
+        self.code = "required_command_missing" if all(t in COMMAND_STATE for t in topics) else "required_signal_missing"
+        super().__init__(f"Required recorded signals have no messages: {self.topics}; action is never filled from feedback")
+
+    def __reduce__(self):
+        return type(self), (self.topics,)
+
+
+class NumericSignals(dict):
+    """Normal numeric mapping with optional, non-required DAgger evidence."""
+
+
 def read_numeric(bag):
-    metadata = yaml.safe_load((bag / "data/metadata.yaml").read_text())["rosbag2_bagfile_information"]
-    empty = [v["topic_metadata"]["name"] for v in metadata.get("topics_with_message_count", [])
-             if v["message_count"] == 0 and v["topic_metadata"]["name"] not in COMMAND_STATE
-             and v["topic_metadata"]["name"] != "/info/web_gripper"]
-    if empty:
-        raise ValueError(f"{bag.name}: cannot intersect empty recorded topics: {empty}")
+    from .dagger import CONTROL_TOPICS, fingerprint
+    bag = Path(bag)
+    metadata = yaml.safe_load((bag / 'data/metadata.yaml').read_text())['rosbag2_bagfile_information']
+    evidence = {'bag':bag.resolve().name, 'origin_ns':int(metadata.get('starting_time',{}).get('nanoseconds_since_epoch',0)),
+                'fingerprint':fingerprint(bag), 'records':[], 'issues':[], 'velocity':[]}
+    event_seq = None
+    optional_previous = {}
     samples = {k: ([], []) for k in TYPES}
     ranges, calibration, clocks = {}, np.asarray(GRIPPER_CALIBRATION), {}
     previous = {}
-    for schema, channel, record, msg in messages(bag_files(bag / "data")):
+    for schema, channel, record, msg in messages(bag_files(bag / "data"), topics=(*TYPES, *CONTROL_TOPICS)):
         topic = channel.topic
         if topic == "/info/web_gripper":
+            continue
+        if topic in CONTROL_TOPICS:
+            rt = int(record.log_time)
+            try:
+                expected = 'std_msgs/msg/String' if topic in CONTROL_TOPICS[:2] else 'std_msgs/msg/Int32'
+                if schema.name != expected: raise ValueError('control_schema_mismatch')
+                value = json.loads(msg.data) if topic in CONTROL_TOPICS[:2] else int(msg.data)
+                if topic in CONTROL_TOPICS[:2] and not isinstance(value,dict): raise ValueError('invalid_control_payload')
+                t = value.get('stamp_ns',rt) if isinstance(value,dict) else rt
+                if type(t) is not int or t <= 0 or abs(t-rt)>1_000_000_000: raise ValueError('control_clock_mismatch')
+                if t < optional_previous.get(topic,t): raise ValueError('control_clock_reversal')
+                optional_previous[topic]=t
+                if topic == CONTROL_TOPICS[1]:
+                    seq=value.get('seq')
+                    if seq is not None:
+                        if type(seq) is not int or event_seq is not None and seq<=event_seq: raise ValueError('event_sequence_reversal_or_duplicate')
+                        event_seq=seq
+                evidence['records'].append({'topic':topic,'time_ns':t,'record_ns':rt,'value':value,
+                                            'valid':True,'order':len(evidence['records'])})
+            except (TypeError,ValueError,AttributeError) as error:
+                evidence['issues'].append(str(error))
+                evidence['records'].append({'topic':topic,'time_ns':rt,'record_ns':rt,'value':{},
+                                            'valid':False,'order':len(evidence['records'])})
+            continue
+        # Optional schemas/clocks cannot invalidate unrelated output features.
+        if topic not in TYPES:
             continue
         t = stamp_ns(msg, record.log_time)
         if t < previous.get(topic, t):
@@ -114,8 +156,6 @@ def read_numeric(bag):
         bounds = ranges.setdefault(topic, [t, t, 0])
         bounds[1], bounds[2] = t, bounds[2] + 1
         clocks[topic] = "header" if hasattr(msg, "header") else "mcap_receipt"
-        if topic not in TYPES:
-            continue
         if schema.name != TYPES[topic]:
             raise ValueError(f"{topic}: expected {TYPES[topic]}, got {schema.name}")
         if topic == "/tj/joint_states":
@@ -123,6 +163,9 @@ def read_numeric(bag):
                 raise ValueError(f"{topic}: expected the 14 named Tianji joints")
             indices = {name: i for i, name in enumerate(msg.name)}
             value = [msg.position[indices[name]] for name in JOINT_NAMES]
+            raw_velocity = getattr(msg, 'velocity', [])
+            velocity = [raw_velocity[indices[name]] for name in JOINT_NAMES] if len(raw_velocity)==14 else None
+            evidence['velocity'].append(velocity if velocity is not None and np.isfinite(velocity).all() else None)
         elif "/joint_cmd_" in topic:
             value = list(msg.positions)
             if len(value) != 7:
@@ -148,13 +191,16 @@ def read_numeric(bag):
             value = [f.x, f.y, f.z, q.x, q.y, q.z]
         samples[topic][0].append(t)
         samples[topic][1].append(value)
-    result = {}
-    for topic, (times, values) in samples.items():
-        if topic in COMMAND_STATE and not times:
-            width = 7 if "/joint_cmd_" in topic else 1
-            result[topic] = Signal(np.empty(0, dtype=np.int64), np.empty((0, width), dtype=np.float64))
-        else:
-            result[topic] = normalize_signal(times, values, topic)
+    missing = [topic for topic, (times, _) in samples.items() if not times]
+    if missing:
+        raise RequiredSignalMissing(missing)
+    result = NumericSignals({topic: normalize_signal(times, values, topic)
+              for topic, (times, values) in samples.items()})
+    jt=np.asarray(samples['/tj/joint_states'][0],dtype=np.int64)
+    keep=np.r_[jt[1:]!=jt[:-1],True]
+    evidence['velocity']=np.asarray(evidence['velocity'],dtype=float)[keep] if all(v is not None for v in evidence['velocity']) else None
+    result.dagger=evidence
+    if not evidence['origin_ns']: evidence['origin_ns']=int(result['/tj/joint_states'].times[0])
     # Express feedback in the thor-v1 driver's fixed normalized target coordinate.
     # Do not clip small telemetry overshoots; retain measured information.
     for side, (lo, hi) in zip(("L", "R"), calibration):

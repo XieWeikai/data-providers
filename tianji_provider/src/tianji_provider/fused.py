@@ -22,7 +22,7 @@ import yaml
 
 from . import __version__
 from .alignment import WRENCH_TOPICS, align, output_grids, previous_indices
-from .diagnostics import REPORT_FORMAT, _issue, discover_for_check, timing_issues
+from .diagnostics import REPORT_FORMAT, _issue, auxiliary_issues, discover_for_check, numeric_error, timing_issues
 from .execution import iter_parallel, worker_count
 from .encoding import LIBX264, encoding_workers, select_encoder, validate_encoder_request, with_encoder_recovery
 from .media import CAMERAS, decode_quad, dimensions
@@ -106,14 +106,14 @@ def _checked_recording(job):
     original_bag, index, destination, config, encoder = job
     bag = original_bag.resolve()
     started = time.monotonic()
-    issues, alignment_issues, stages = [], [], []
+    issues, alignment_issues, stages = auxiliary_issues(bag), [], []
     signals = ranges = paths = video_times = alignment = segments = None
     media = {"full_decode": True, "decoded_frames": None, "quad_size": None}
     try:
         signals, ranges, clocks, calibration = read_numeric(bag)
         stages.append("numeric_schema_values_clocks_calibration")
     except Exception as error:
-        issues.append(_issue("numeric_read_error", "error", str(error), exception_type=type(error).__name__))
+        issues.append(numeric_error(error))
     try:
         paths = video_files(bag)
         video_times = read_video_times(paths)
@@ -185,7 +185,7 @@ def _checked_recording(job):
             error = inspection.error
             issues.append(_issue("video_decode_error", "error", str(error), exception_type=type(error).__name__))
     if aligned_stage:
-        stages.append("alignment_state_fallback_and_stationary_trim")
+        stages.append("alignment_strict_commands_and_stationary_trim")
     issues.extend(alignment_issues)
     if alignment is not None and alignment["trimmed_frames"]:
         issues.append(_issue("stationary_edges_trimmed", "info", "Stationary edges trimmed; interior pauses retained",
@@ -205,6 +205,10 @@ def check_and_prepare(root, destination, config, *, workers=None, progress=None,
     Progress callbacks may restart at index one after an encoder retry. Only
     the returned complete report is authoritative, never a partial attempt.
     """
+    if getattr(config,'processing_mode','standard')=='dagger':
+        from .dagger_prepare import check_and_prepare as dagger_prepare
+        return dagger_prepare(root,destination,config,workers=workers,progress=progress,
+                              video_encoder=video_encoder,prepare_valid_only=prepare_valid_only)
     return with_encoder_recovery(destination, video_encoder, lambda: _snapshot(Path(root).expanduser().resolve()),
         lambda codec, recovery: _check_and_prepare(root, destination, config, workers=workers,
             progress=progress, video_encoder=codec, prepare_valid_only=prepare_valid_only, recovery=recovery))

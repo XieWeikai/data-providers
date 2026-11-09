@@ -13,7 +13,7 @@ class TianjiConfig:
     wrench_fps: int = 200
     gap_policy: str = "error"
     max_gap_ms: float = 100.0
-    command_max_age_ms: float = 100.0
+    command_max_age_ms: float = 100.0  # Deprecated compatibility field; joint targets do not expire.
     gripper_max_gap_ms: float = 150.0
     state_resampling: str = "lowpass"
     preset: str = "thor-v1"
@@ -21,7 +21,26 @@ class TianjiConfig:
     motion_joint_threshold_rad: float = 0.002
     motion_gripper_threshold: float = 0.01
 
+    processing_mode: str = "standard"
+    dagger_export: str = "annotate"
+    dagger_stop_speed: float = .01
+    dagger_velocity_limit: float = .02
+    dagger_motion_speed: float = .035
+    dagger_min_pause_s: float = .10
+    dagger_max_pause_s: float = 5.
+    dagger_position_range: float = .004
+    dagger_feedback_gap_ms: float = 40.
+    dagger_command_gap_ms: float = 150.
+    dagger_hold_range: float = .001
+    dagger_status_ttl_ms: float = 1500.
+    dagger_exclude: str = "reviewed"
+    dagger_exclusion_region: str = "command"
+    dagger_min_segment_frames: int = 2
+    dagger_reviews_json: str = "[]"
+
     def __post_init__(self):
+        from .dagger import validate_config
+        validate_config(self)
         if not isinstance(self.task, str) or not self.task.strip():
             raise ValueError("--task is required and must not be blank")
         object.__setattr__(self, "task", self.task.strip())
@@ -52,6 +71,15 @@ class TianjiProvider(SourceProvider[TianjiConfig]):
 
     def add_arguments(self, parser, *, task_required=True):
         from argparse import BooleanOptionalAction
+        parser.add_argument("--processing-mode", choices=("standard", "dagger"), default="standard")
+        parser.add_argument("--dagger-export", choices=("annotate", "expert_segments"), default="annotate")
+        parser.add_argument("--dagger-exclude", choices=("none", "reviewed", "suspected"), default="reviewed")
+        parser.add_argument("--dagger-exclusion-region", choices=("motion", "command"), default="command")
+        parser.add_argument("--dagger-reviews-json", default="[]")
+        from .dagger import DEFAULTS
+        for name, value in DEFAULTS.items():
+            if name in ("dagger_exclude", "dagger_exclusion_region", "dagger_reviews_json"): continue
+            parser.add_argument("--"+name.replace("_", "-"), type=type(value), default=value)
         parser.add_argument("--task", required=task_required, default=None if task_required else "validation",
                             help="Task instruction stored in LeRobot metadata")
         parser.add_argument("--fps", type=int, default=50, help="Output FPS (default: 50)")
@@ -62,9 +90,9 @@ class TianjiProvider(SourceProvider[TianjiConfig]):
         parser.add_argument("--max-gap-ms", type=float, default=100.0,
                             help="Maximum feedback sample gap and video frame age (default: 100 ms)")
         parser.add_argument("--command-max-age-ms", type=float, default=100.0,
-                            help="Joint command age before using aligned joint feedback (default: 100 ms)")
+                            help="Deprecated compatibility option; joint commands have no age limit")
         parser.add_argument("--gripper-max-gap-ms", type=float, default=150.0,
-                            help="Gripper command age before using aligned gripper feedback (default: 150 ms)")
+                            help="Maximum recorded gripper command age; stale/missing commands fail (default: 150 ms)")
         parser.add_argument("--state-resampling", choices=("lowpass", "linear"), default="lowpass",
                             help="Joint/gripper feedback and EEF translation resampling; never filters wrench")
         parser.add_argument("--trim-stationary", action=BooleanOptionalAction, default=True,
@@ -77,7 +105,11 @@ class TianjiProvider(SourceProvider[TianjiConfig]):
     def config_from_args(self, args, context):
         return TianjiConfig(**{key: getattr(args, key) for key in (
             "task", "fps", "wrench_fps", "gap_policy", "max_gap_ms", "command_max_age_ms", "gripper_max_gap_ms", "state_resampling",
-            "trim_stationary", "motion_joint_threshold_rad", "motion_gripper_threshold")})
+            "trim_stationary", "motion_joint_threshold_rad", "motion_gripper_threshold",
+            "processing_mode", "dagger_export", "dagger_stop_speed", "dagger_velocity_limit", "dagger_motion_speed",
+            "dagger_min_pause_s", "dagger_max_pause_s", "dagger_position_range", "dagger_feedback_gap_ms",
+            "dagger_command_gap_ms", "dagger_hold_range", "dagger_status_ttl_ms", "dagger_exclude",
+            "dagger_exclusion_region", "dagger_min_segment_frames", "dagger_reviews_json")})
 
     def open(self, source: Path, config: TianjiConfig):
         from .source import TianjiSource

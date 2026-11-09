@@ -61,7 +61,7 @@ tianji = "tianji_provider.provider:provider"
 | [provider.py](../src/tianji_provider/provider.py) | 插件注册、配置与参数 | 保持发现/构造轻量，昂贵依赖在使用时加载 |
 | [reader.py](../src/tianji_provider/reader.py) | 文件发现、MCAP/schema/CDR 解析、单位和时钟校验 | 集中原始格式契约，避免 CLI 与转换各写一套解析 |
 | [decoder.py](../src/tianji_provider/decoder.py) | 每个 schema 预编译消息类及字段读取计划 | 消除逐消息的重复类型构造，仍完整解码所有字段 |
-| [alignment.py](../src/tianji_provider/alignment.py) | 网格、有效性、重采样、命令补齐、首尾裁剪 | 使用数组算法，供 source 和 diagnostics 共用 |
+| [alignment.py](../src/tianji_provider/alignment.py) | 网格、有效性、重采样、严格动作有效性、首尾裁剪 | 使用数组算法，供 source 和 diagnostics 共用 |
 | [media.py](../src/tianji_provider/media.py) | H.264 顺序解码、四宫格裁分、PPM 帧、图像统计 | 将大体积图像保持为有界流式处理 |
 | [source.py](../src/tianji_provider/source.py) | 原始/缓存双路径、Arrow 表、Episode、DatasetMetadata、审计 | 对上游暴露统一只读 DatasetSource |
 | [diagnostics.py](../src/tianji_provider/diagnostics.py) | 逐条检查、错误分类、缺口明细与进度回调 | 允许数值/视频独立检查，一条失败后仍检查其他条 |
@@ -80,23 +80,23 @@ tianji = "tianji_provider.provider:provider"
 
 数值 MCAP 使用嵌入的 ROS 2 schema 解码。关节名称重排、7 维命令、5 项夹爪电机反馈、目标归一化范围、EEF/wrench 坐标系逐消息核对。用于输出的数值必须有限。
 
-`CompiledDecoderFactory` 按单个 MCAP 文件的 schema 缓存消息类和字段读取计划，不再对每个嵌套值重复构造 Python type 或格式化 schema 文本。仍复用 mcap-ros2-support 的 schema parser 与 CdrReader，完整解码辅助 topic、Header 和所有字段；没有通过跳过数据来加速，也不修改第三方全局函数。由于使用该依赖的私有解析接口，目前限制版本为 `>=0.5.7,<0.6`；升级依赖必须重新运行与 stock DecoderFactory 的差分测试。缓存按文件隔离，不能跨 bag 仅用 schema.id 共享。
+`CompiledDecoderFactory` 按单个 MCAP 文件的 schema 缓存消息类和字段读取计划，不再对每个嵌套值重复构造 Python type 或格式化 schema 文本。仍复用 mcap-ros2-support 的 schema parser 与 CdrReader，读取用于输出的 topic、Header 和所有必需字段；辅助 topic 不进入数值解码和对齐，也不修改第三方全局函数。由于使用该依赖的私有解析接口，目前限制版本为 `>=0.5.7,<0.6`；升级依赖必须重新运行与 stock DecoderFactory 的差分测试。缓存按文件隔离，不能跨 bag 仅用 schema.id 共享。
 
-有 Header 用 `header.stamp`，无 Header 用 MCAP log_time；Header 非法或与记录时间相差超过 1 秒就失败。同 topic 时间倒退不通过排序掩盖；相同时间戳保留最后一条更新。已录制的辅助 topic 也参与时间范围与时钟检查。
+有 Header 用 `header.stamp`，无 Header 用 MCAP log_time；Header 非法或与记录时间相差超过 1 秒就失败。同 topic 时间倒退不通过排序掩盖；相同时间戳保留最后一条更新。辅助 topic 不参与输出时间范围求交；空通道作为独立说明记录。
 
-只有四路 action 命令允许缺失或整段为空，reader 为它们返回维度明确的空 Signal，不伪造消息时间；必需观测缺失仍失败，metadata 中声明为空的非豁免 topic 也失败。夹爪使用固定 `[0,1.6]` rad 映射，不读取 `/info/web_gripper`，该 topic 为空或缺失均不影响转换。非空的坏命令不能借补齐逻辑隐藏。
+四路 action 命令与必需观测均要求实际存在消息；空指令抛出带 topic 的 required_command_missing。辅助 topic 允许为空；夹爪使用固定 `[0,1.6]` rad 映射，不读取 `/info/web_gripper`，该 topic 为空或缺失均不影响转换。坏指令不能被反馈替换。
 
 视频用专用解析器读取标准 CompressedImage CDR 包，校验编码、长度和 schema，避免把大 H.264 字节数组展开成 Python 整数。视频 Header 与记录时间要求相等、时间严格递增且至少两帧。解码器为每包设置顺序标识并核对返回帧顺序与数量，拒绝含糊的帧/消息对应关系。
 
 ## 时间范围与对齐算法
 
-### 1. 观测交集与命令并集
+### 1. 必需观测交集与独立指令覆盖
 
-令 `O` 为非 action-command 的已录制 topic 起止区间与视频区间的交集。辅助信号即使不输出，仍可缩短 O；不能只看 state 与视频的时长。
+令 `O` 为必需关节/夹爪反馈、EEF、wrench 与视频区间的交集。标定、模式、事件及其他辅助 topic 不限制 O。
 
-每路命令的每条消息在 `[消息时间, 消息时间 + 该路年龄阈值]` 内有效，含两端。令 `C` 为四路命令这些区间的并集。候选规则网格的外边界采用 `O` 与 C 的最早起点/最晚终点包络的交集；不是要求四路各自区间相交。
+每路命令的每条消息在 `[消息时间, 消息时间 + 该路年龄阈值]` 内有效，含两端。候选规则网格直接使用 O；不能按指令首尾裁短 O 来隐藏缺失。
 
-候选窗口内部可能仍有 C 的空洞。实现不会拼接 C 的多个区间，而是在裁剪后逐个采样点验证至少一路命令新鲜；有内部全路失效则整条失败。四路完全没有消息时直接失败。其余单路空命令不限制候选边界。
+按真实反馈完成可选的静止首尾裁剪后，逐点建立四路动作；双臂首条前使用同帧反馈初始化，整路指令为空或夹爪无有效目标才失败，不拼接、不删除中间点。
 
 ### 2. 用纳秒生成规则网格
 
@@ -118,23 +118,23 @@ tianji = "tianji_provider.provider:provider"
 
 ### 5. 为四路 action 赋值
 
-每路做向过去的时间查找。`age <= limit` 则取原命令；尚未出现、整段为空或 age 超限，则取同帧对应反馈。四路独立判断，任何一条新命令在其时间戳起立即有效。
+每路做向过去的时间查找。A/B 关节指令无消息间隔或有效期限制，最近目标持续保持；首条关节指令之前用同帧关节反馈初始化保持目标。夹爪要求 `age <= limit`。整路指令为空、夹爪尚无历史目标或 age 超限时拒绝。四路独立判断，新命令在其时间戳起立即有效。
 
 ```text
 某个输出时刻：
 左臂目标有效  → action[0:7]   = 左臂记录目标
-左夹爪过期    → action[7]     = state[7]
-右臂整段为空  → action[8:15]  = state[8:15]
+左夹爪过期    → 拒绝录制，不填 state[7]
+右臂整段为空  → 拒绝录制，不填 state[8:15]
 右夹爪有效    → action[15]    = 右夹爪记录目标
 ```
 
-补的是已重采样的当前 state，不是未来指令、上一帧 state 或永不过期的旧目标。保留窗口每点至少一路有效，否则失败。原始观测不会因补命令被合成或豁免质量检查。
+Action 的关节前缀使用同帧 observation.state 对应关节值作为保持目标，首条指令起只使用过去的真实目标；中间停更沿用已有目标。夹爪不使用反馈替代。joint_prefix_initialization记录每臂填充帧数、首条指令时间及反馈来源；这属于转换约定，不证明录制中存在同值指令。观测质量检查保持严格。
 
 ### 6. 拼装输出与审计
 
 四路相机使用同一个过去帧索引；30→50 FPS 重复画面，不做运动插帧。所有数值列转为 float32，再计算统计；索引列为 int64，输出相对时间从零开始。一个 bag 只产生一个 episode，`dropped_frames=0`，`grid_frames=kept_frames+trimmed_frames`。
 
-Report 记录候选边界、裁剪前后帧数、trim 窗口、每路无效帧、命令补齐数与范围、空命令 topic、最少有效命令路数、信号起止范围和最大视频年龄。Source 再加入原始 bag、时钟来源、夹爪标定和 episode 映射。Audit 保存每一输出点的绝对时间、原视频包索引及视频时间，以及 `[行数,N]` 的 wrench 网格时间、`[行数,N,2]` 的左右实际 wrench 源消息时间。Report 另存高频网格起点、裁剪前窗口索引、采样策略、频率、每行样本数及最大测量年龄。
+Report 记录候选边界、裁剪前后帧数、trim 窗口、每路无效帧、首条关节指令前的反馈初始化策略、四路同时有效规则、最少有效命令路数、信号起止范围和最大视频年龄。Source 再加入原始 bag、时钟来源、夹爪标定和 episode 映射。Audit 保存每一输出点的绝对时间、原视频包索引及视频时间，以及 `[行数,N]` 的 wrench 网格时间、`[行数,N,2]` 的左右实际 wrench 源消息时间。Report 另存高频网格起点、裁剪前窗口索引、采样策略、频率、每行样本数及最大测量年龄。
 
 `observation.wrench_windows` 的 Arrow 类型是嵌套 fixed-size list，两个列表轴对应 N 和 12，不能展平成 N*12。统计沿行轴聚合，结果形状 `[N,12]`、count 为行数。Features 的 `sampling_rate_hz` 标识内部频率，`sample_offsets_seconds` 标识相对主帧偏移，`component_names` 标识 12 个力分量；不把外层行 FPS 冒充为内部频率。字段 `names=null`，避免把 12 个标签误当成 N 维外轴名称。
 
@@ -182,7 +182,7 @@ Prepare 写数值和审计后编码，清单最后写入；它是完成标识，
 
 ## 缓存、计划和版本
 
-三个版本概念独立：包版本 `0.6.3`、provider API `2`、缓存格式 `tianji-thor-v4`；目标可以是 LeRobot v2.1 或 v3.0。0.6.3 保持 0.6.0 的字段与信号语义，编码配方单独记录在 manifest，不升级缓存格式。
+三个版本概念独立：包版本 `0.7.2`、provider API `2`、缓存格式 `tianji-thor-v7`；目标可以是 LeRobot v2.1 或 v3.0。0.7.0 禁止反馈替代 action，并移除辅助 topic 对时间窗的影响；0.7.1 取消双臂关节指令有效期，旧 v4/v5/v6 缓存必须重建。编码配方另行记录在 manifest。
 
 普通 prepare 的缓存复用比较格式、完整配置（排除 task）、MCAP 路径/大小/mtime 指纹，以及请求对应的编码配方白名单。auto 接受旧/当前 x264 CRF18 或当前 NVENC CQ16/Main 配方；显式请求只接受自身配方，旧 x264 缺少 options 字典可按其质量字段识别。任意 H.264 或其他 CQ/profile 不能借 auto 直接复用。缓存命中不再探测 GPU。
 
@@ -205,3 +205,6 @@ Provider 0.6.2 的融合 API 被 Web 调用后，再执行 convert、deep valida
 - 改视频策略需核对相机顺序、分辨率、帧数、PTS、命令/观测时间、最终解码结果；仅格式验证不能证明画质。
 - 新机器人应建立独立 provider 或显式扩展契约，不能默默套用 Tianji 的关节名称与标定假设。
 - 分布式行为未经验证前保持显式拒绝，不因有配置序列化或 profile 就宣称支持。
+
+
+0.7.2 更新：取消双臂首条指令前缀导致质检失败的规则，仅此区间允许同帧关节反馈初始化保持目标，记录 joint_command_prefix_initialized（info）和 joint_prefix_initialization；不改变轨迹边界和帧数。新缓存格式为 `tianji-thor-v7`。

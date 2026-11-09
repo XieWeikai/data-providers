@@ -72,7 +72,12 @@ def _prepare(root, destination, config, *, workers, video_encoder, recovery):
     manifest_path = destination / "tianji-cache.json"
     if manifest_path.is_file():
         old = json.loads(manifest_path.read_text())
-        if old.get("format") == FORMAT and old.get("alignment_config") == options and old.get("source_fingerprint") == origin:
+        stored=dict(old.get('alignment_config',{}))
+        if 'processing_mode' not in stored:
+            from .provider import TianjiConfig
+            defaults=asdict(TianjiConfig(task='cache compatibility'))
+            stored.update({k:v for k,v in defaults.items() if k.startswith('dagger_') or k=='processing_mode'})
+        if old.get("format") == FORMAT and stored == options and old.get("source_fingerprint") == origin:
             if not cache_encoder_matches(old, video_encoder):
                 raise ValueError("Existing cache video encoder/quality recipe differs; choose a new destination")
             # Reopen verifies all referenced resources still exist.
@@ -111,6 +116,7 @@ def _prepare(root, destination, config, *, workers, video_encoder, recovery):
     jobs = []
     for bag in discover(root):
         group = [ep for ep in episodes if ep.data_path == bag]
+        if not group: continue
         first = group[0].videos["observation.image.head_left"]
         # Send only this recording's paths and indices. Pickling source would
         # copy the entire batch of numeric tables/audits into every worker.
@@ -136,7 +142,7 @@ def _prepare(root, destination, config, *, workers, video_encoder, recovery):
     w = source.metadata.features["observation.image.head_left"]["shape"][1]
     h = source.metadata.features["observation.image.head_left"]["shape"][0]
     manifest = {"format": FORMAT, "alignment_config": options, "source_fingerprint": origin,
-                "features": features(w, h, config.fps, "h264", wrench_fps=config.wrench_fps), "episodes": entries, "reports": source.reports,
+                "features": features(w, h, config.fps, "h264", wrench_fps=config.wrench_fps, dagger=config.processing_mode=="dagger"), "episodes": entries, "reports": source.reports,
                 "video_prepare_seconds": time.perf_counter() - started,
                 "timings": {"source_alignment_seconds": alignment_seconds,
                             "table_write_seconds": tables_seconds,
