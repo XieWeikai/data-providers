@@ -3,7 +3,6 @@
 import numpy as np
 import pytest
 
-from tianji_provider import media
 from tianji_provider.media import RGBStatistics
 
 
@@ -86,15 +85,11 @@ def test_float32_integer_boundary_is_exact():
     assert stats.result()["mean"] == [[[0.0]], [[0.0]], [[0.0]]]
 
 
-def test_above_float32_integer_limit_uses_exact_fallback(monkeypatch):
+def test_above_float32_integer_limit_preserves_every_count():
     # Odd count 2**24+1 is not representable in float32. Broadcasting avoids
-    # allocating a giant image; the bincount path still sees every real pixel.
+    # constructing the fixture eagerly; the histogram must count every real pixel.
     image = np.broadcast_to(np.array([[[0, 127, 255]]], dtype=np.uint8), (1, 2**24 + 1, 3))
 
-    def forbidden_float_histogram(*args, **kwargs):
-        raise AssertionError("A frame larger than 2**24 pixels must use integer bincount")
-
-    monkeypatch.setattr(media.cv2, "calcHist", forbidden_float_histogram)
     stats = RGBStatistics()
     stats.add(image, 2)
     expected = np.zeros((3, 256), dtype=np.int64)

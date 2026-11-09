@@ -1,10 +1,12 @@
 """One complete episode with strict observations and four recorded action streams."""
 
 from fractions import Fraction
+from functools import lru_cache
 
+import mcap_ops as ops
 import numpy as np
 from scipy.interpolate import interp1d
-from scipy.signal import resample_poly
+from scipy.signal import firwin
 from scipy.spatial.transform import Rotation, Slerp
 
 
@@ -13,16 +15,23 @@ def uniform_grid(start, end, fps):
     count = (int(end) - int(start)) * fps // 1_000_000_000 + 1
     if count < 1:
         raise ValueError("Signals have no common time interval")
-    k = np.arange(count, dtype=np.int64)
-    result = int(start) + (k * 1_000_000_000 + fps // 2) // fps
-    return result[result <= end]
+    points = ops.uniform_grid(int(start), int(end), fps, 1, count)
+    # The library grid is half-open. Only add the endpoint if its rational tick exists.
+    if len(points) < count:
+        points.append(int(end))
+    return np.asarray(points, dtype=np.int64)
+
+
+def _support(times, grid, max_gap_ns=0, *, recorded=True):
+    support = ops.sample_support(np.ascontiguousarray(times, dtype=np.int64),
+                                 np.ascontiguousarray(grid, dtype=np.int64), max_gap_ns)
+    if recorded and ((support["previous"] < 0).any() or (support["next"] < 0).any()):
+        raise ValueError("Extrapolation outside a signal's recorded interval is forbidden")
+    return support
 
 
 def previous_indices(times, grid):
-    indices = np.searchsorted(times, grid, side="right") - 1
-    if np.any(indices < 0) or np.any(grid > times[-1]):
-        raise ValueError("Extrapolation outside a signal's recorded interval is forbidden")
-    return indices
+    return _support(times, grid)["previous"]
 
 
 def output_grids(start, end, config):
@@ -39,12 +48,10 @@ def output_grids(start, end, config):
 
 
 def valid_mask(times, grid, max_gap_ns, causal=False):
-    left = previous_indices(times, grid)
+    support = _support(times, grid, max_gap_ns)
     if causal:
-        return grid - times[left] <= max_gap_ns
-    right = np.minimum(left + 1, len(times) - 1)
-    exact = grid == times[left]
-    return exact | (times[right] - times[left] <= max_gap_ns)
+        return grid - times[support["previous"]] <= max_gap_ns
+    return support["supported"]
 
 
 def runs(mask):
@@ -79,7 +86,7 @@ def command_samples(signal, grid, max_age_ns):
     Empty streams and times before the first command have no usable sample.
     None disables expiry; an explicit age limit remains inclusive.
     """
-    indices = np.searchsorted(signal.times, grid, side="right") - 1
+    indices = _support(signal.times, grid, recorded=False)["previous"]
     valid = indices >= 0
     if max_age_ns is not None:
         valid[valid] = grid[valid] - signal.times[indices[valid]] <= max_age_ns
@@ -113,17 +120,15 @@ def moving_bounds(times, feedback, joint_threshold, gripper_threshold):
     Only the outer edges are trimmed; interior pauses remain in the episode.
     """
     threshold = np.r_[np.full(14, joint_threshold), gripper_threshold, gripper_threshold]
-    first = np.median(feedback[times <= times[0] + 200_000_000], axis=0)
-    last = np.median(feedback[times >= times[-1] - 200_000_000], axis=0)
-    changed_from_first = np.flatnonzero(np.any(np.abs(feedback - first) > threshold, axis=1))
-    changed_from_last = np.flatnonzero(np.any(np.abs(feedback - last) > threshold, axis=1))
-    if not len(changed_from_first) or not len(changed_from_last):
-        raise ValueError("No motion exceeds the joint/gripper thresholds; use --no-trim-stationary or lower the thresholds")
-    a = max(0, int(changed_from_first[0]) - 1)
-    b = min(len(times), int(changed_from_last[-1]) + 2)
-    if b - a < 2:
-        raise ValueError("Motion interval contains fewer than two output frames")
-    return a, b
+    window = 200_000_000
+    bounds = ops.motion_bounds(np.ascontiguousarray(times), feedback, threshold, window)
+    if bounds is not None:
+        return bounds
+    # Preserve the two original diagnostic reasons on the rare empty-selection path.
+    for edge in (times <= times[0] + window, times >= times[-1] - window):
+        if not np.any(np.abs(feedback - np.median(feedback[edge], axis=0)) > threshold):
+            raise ValueError("No motion exceeds the joint/gripper thresholds; use --no-trim-stationary or lower the thresholds")
+    raise ValueError("Motion interval contains fewer than two output frames")
 
 
 def command_targets(signal, grid, max_age_ns, topic, *, prefix_values=None):
@@ -138,6 +143,14 @@ def command_targets(signal, grid, max_age_ns, topic, *, prefix_values=None):
     if prefix.any():
         targets[prefix] = prefix_values[prefix]
     return targets
+
+
+@lru_cache(maxsize=32)
+def _kaiser_taps(rate):
+    # Match the existing resample_poly default kernel at the reduced upsampled rate.
+    taps = firwin(20 * rate + 1, 1.0 / rate, window=("kaiser", 5.0))
+    taps.flags.writeable = False
+    return taps
 
 
 def interpolate(times, values, grid, fps, max_gap_ns, mode="lowpass"):
@@ -171,7 +184,8 @@ def interpolate(times, values, grid, fps, max_gap_ns, mode="lowpass"):
             # supplies the FIR boundary condition, not new target timestamps.
             pad = max(1, int(np.ceil(hz / fps)))
             sampled = np.pad(sampled, ((pad, pad), (0, 0)), mode="edge")
-            y = resample_poly(sampled, ratio.numerator, ratio.denominator, axis=0, padtype="line")
+            y = ops.polyphase_fir(sampled, ratio.numerator, ratio.denominator,
+                                   _kaiser_taps(max(ratio.numerator, ratio.denominator)))
             x = np.arange(len(y), dtype=np.float64) / fps - pad / hz
             output[select] = interp1d(x, y, axis=0, assume_sorted=True)(q)
         else:
