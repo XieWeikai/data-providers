@@ -1,0 +1,372 @@
+{
+  "dataset": "two generated ROS 2 recordings, six seconds each, 1920x1080 H.264 mosaic, 30 Hz",
+  "provider_worker_count": 1,
+  "cpu_affinity": [
+    12,
+    13,
+    14,
+    15
+  ],
+  "encoder": "libx264, CRF 18, veryfast",
+  "grid_hz": 50,
+  "wrench_hz": 200,
+  "environment": {
+    "platform": "Linux x86_64",
+    "python": "3.12.3",
+    "cpu": "Intel(R) Core(TM) i9-14900K",
+    "versions": {
+      "letools": "0.1.0",
+      "letools-native": "0.2.0",
+      "av": "16.1.0",
+      "numpy": "2.5.3",
+      "scipy": "1.18.1",
+      "pyarrow": "25.0.1",
+      "opencv-python-headless": "4.14.0.94",
+      "mcap": "1.5.0",
+      "mcap-ros2-support": "0.5.7",
+      "PyYAML": "6.0.3"
+    }
+  },
+  "provider_baseline": "0e9c6acc8839199a4bc2a467fe5cd164f35bd8a3",
+  "provider_refactor": "48118f3e9ad38eb32fb975d5728e503e9bb54502",
+  "letools_commit": "834941bd83222dd86324a825b5eae76c30b60cc1",
+  "mcap_ops_commit": "4ae4c0ba1a77d7b911e7088d317fbfed09b25421",
+  "mcap_ops_wheel_sha256": "9454a2137942a9e9e0f1064bb211ca2573e70529461f8ea42e53daf77e80349b",
+  "tests": {
+    "baseline": 248,
+    "refactor": 254,
+    "mcap_ops_wheel": 90
+  },
+  "equivalence": {
+    "alignment": {
+      "exact": true,
+      "frames": 4680,
+      "evidence_sha256": "915e8d37e27d366584dcdad94c4b07d4728c7308334bb3bf5b570ccc4cbac62c"
+    },
+    "direct": {
+      "exact": true,
+      "frames": 468,
+      "evidence_sha256": "b9fd7e627e77a2c8ca51220cee8e8b988972a4a14fbe0319d4d8af56f48f3269"
+    },
+    "fused": {
+      "exact": true,
+      "frames": 468,
+      "evidence_sha256": "b6de5b84395f7e5c46690de542e3acc3a0efd47eea72328ffbb2609a8a972c76"
+    },
+    "dagger-annotate": {
+      "exact": true,
+      "frames": 468,
+      "evidence_sha256": "17845b513b7390f81ac0ccd24d135701613015f841adf78f671e7cc05e82f0fe"
+    },
+    "dagger-expert": {
+      "exact": true,
+      "frames": 288,
+      "evidence_sha256": "c74a5f74cbb630a0835cd6e69c8c651854cc0ca514b45b49c30a8a0b8c68f1ef"
+    }
+  },
+  "input_sha256_before_and_after": {
+    "generated-000/data/metadata.yaml": "b869eb87c302147d3b6e41362db5e335e4c552e6202e4e289c5d3c7f6c8dd851",
+    "generated-000/data/part.mcap": "4084a921eea63c792e74ba9ef98e09ae6de135c65283adf70bebd789e666a589",
+    "generated-000/video/mosaic/metadata.yaml": "b869eb87c302147d3b6e41362db5e335e4c552e6202e4e289c5d3c7f6c8dd851",
+    "generated-000/video/mosaic/part.mcap": "c9a2a137ae847d67f747e7acd15e7b3e84f1e52438589feace80a709fa2accf5",
+    "generated-001/data/metadata.yaml": "1cceeafd24843091b553f66390e533c436e5a613593b0555a94747ed51bc695e",
+    "generated-001/data/part.mcap": "49d06cc05e47cec4f2d2b31d91df10d4bacf76f7f8965ece74de3d423c7bd3fa",
+    "generated-001/video/mosaic/metadata.yaml": "1cceeafd24843091b553f66390e533c436e5a613593b0555a94747ed51bc695e",
+    "generated-001/video/mosaic/part.mcap": "4353f63c2f6f7af4093b69852014c631056811b44ad55cc727d4cd72f7d6d0f3"
+  },
+  "runs": [
+    {
+      "block": 0,
+      "case": "alignment",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "case": "alignment",
+        "frames": 4680,
+        "recordings": 20,
+        "seconds": 0.06635494000511244
+      },
+      "after": {
+        "case": "alignment",
+        "frames": 4680,
+        "recordings": 20,
+        "seconds": 0.05585763597628102
+      }
+    },
+    {
+      "block": 0,
+      "case": "direct",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "case": "direct",
+        "frames": 468,
+        "recordings": 2,
+        "seconds": 2.7169299490051344
+      },
+      "after": {
+        "case": "direct",
+        "frames": 468,
+        "recordings": 2,
+        "seconds": 2.506742546975147
+      }
+    },
+    {
+      "block": 0,
+      "case": "fused",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "case": "fused",
+        "frames": 468,
+        "recordings": 2,
+        "seconds": 11.240959394024685
+      },
+      "after": {
+        "case": "fused",
+        "frames": 468,
+        "recordings": 2,
+        "seconds": 10.993011075945105
+      }
+    },
+    {
+      "block": 1,
+      "case": "alignment",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "case": "alignment",
+        "frames": 4680,
+        "recordings": 20,
+        "seconds": 0.054952845035586506
+      },
+      "before": {
+        "case": "alignment",
+        "frames": 4680,
+        "recordings": 20,
+        "seconds": 0.06408435001503676
+      }
+    },
+    {
+      "block": 1,
+      "case": "direct",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "case": "direct",
+        "frames": 468,
+        "recordings": 2,
+        "seconds": 2.4999678140156902
+      },
+      "before": {
+        "case": "direct",
+        "frames": 468,
+        "recordings": 2,
+        "seconds": 2.7635946080554277
+      }
+    },
+    {
+      "block": 1,
+      "case": "fused",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "case": "fused",
+        "frames": 468,
+        "recordings": 2,
+        "seconds": 10.973274425021373
+      },
+      "before": {
+        "case": "fused",
+        "frames": 468,
+        "recordings": 2,
+        "seconds": 11.399894111033063
+      }
+    },
+    {
+      "block": 2,
+      "case": "alignment",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "case": "alignment",
+        "frames": 4680,
+        "recordings": 20,
+        "seconds": 0.06361278804251924
+      },
+      "after": {
+        "case": "alignment",
+        "frames": 4680,
+        "recordings": 20,
+        "seconds": 0.053453509986866266
+      }
+    },
+    {
+      "block": 2,
+      "case": "direct",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "case": "direct",
+        "frames": 468,
+        "recordings": 2,
+        "seconds": 2.7227305179694667
+      },
+      "after": {
+        "case": "direct",
+        "frames": 468,
+        "recordings": 2,
+        "seconds": 2.5209808349609375
+      }
+    },
+    {
+      "block": 2,
+      "case": "fused",
+      "order": [
+        "before",
+        "after"
+      ],
+      "before": {
+        "case": "fused",
+        "frames": 468,
+        "recordings": 2,
+        "seconds": 11.30379559501307
+      },
+      "after": {
+        "case": "fused",
+        "frames": 468,
+        "recordings": 2,
+        "seconds": 10.92940650699893
+      }
+    },
+    {
+      "block": 3,
+      "case": "alignment",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "case": "alignment",
+        "frames": 4680,
+        "recordings": 20,
+        "seconds": 0.05487400898709893
+      },
+      "before": {
+        "case": "alignment",
+        "frames": 4680,
+        "recordings": 20,
+        "seconds": 0.06610235199332237
+      }
+    },
+    {
+      "block": 3,
+      "case": "direct",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "case": "direct",
+        "frames": 468,
+        "recordings": 2,
+        "seconds": 2.5189589859801345
+      },
+      "before": {
+        "case": "direct",
+        "frames": 468,
+        "recordings": 2,
+        "seconds": 2.738753647019621
+      }
+    },
+    {
+      "block": 3,
+      "case": "fused",
+      "order": [
+        "after",
+        "before"
+      ],
+      "after": {
+        "case": "fused",
+        "frames": 468,
+        "recordings": 2,
+        "seconds": 10.88865496701328
+      },
+      "before": {
+        "case": "fused",
+        "frames": 468,
+        "recordings": 2,
+        "seconds": 11.175500107987318
+      }
+    }
+  ],
+  "summary": {
+    "alignment": {
+      "before": {
+        "frames_per_second": 71914.02329892023,
+        "recordings_per_second": 307.3248858928215
+      },
+      "after": {
+        "frames_per_second": 85225.1018769175,
+        "recordings_per_second": 364.20983708084395
+      },
+      "paired_throughput_ratio": [
+        1.1879296150894916,
+        1.1661698311258835,
+        1.1900582030656013,
+        1.2046204243772907
+      ],
+      "median_change_pct": 18.899390907754654
+    },
+    "direct": {
+      "before": {
+        "frames_per_second": 171.38346067548466,
+        "recordings_per_second": 0.7324079516046352
+      },
+      "after": {
+        "frames_per_second": 186.24375611808227,
+        "recordings_per_second": 0.7959134876841123
+      },
+      "paired_throughput_ratio": [
+        1.0838488189717042,
+        1.1054520752474306,
+        1.08002824940621,
+        1.0872561491722597
+      ],
+      "median_change_pct": 8.55524840719819
+    },
+    "fused": {
+      "before": {
+        "frames_per_second": 41.51773978858879,
+        "recordings_per_second": 0.1774262384127726
+      },
+      "after": {
+        "frames_per_second": 42.734666026547615,
+        "recordings_per_second": 0.1826267778912291
+      },
+      "paired_throughput_ratio": [
+        1.022555086715244,
+        1.038878065879671,
+        1.0342552075242504,
+        1.0263434870370145
+      ],
+      "median_change_pct": 3.029934728063255
+    }
+  }
+}

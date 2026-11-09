@@ -27,3 +27,5 @@ taskset -c "$CPU_SET" python benchmarks/operator_comparison/paired.py \
 ```
 
 The generator needs NumPy, PyYAML, PyAV (libx264) and mcap-ros2-support. The two recordings contain 6 s each of generated numeric CDR and 1920x1080 mosaics at 30 Hz; the provider uses its default 50 Hz rows and 200 Hz wrench grid. The comparison pins one provider worker and the software encoder on both sides. Validation and output fingerprinting run outside timed sections. All four paired blocks use fresh conversions with warm filesystem caches, in alternating old/new and new/old order. Each invocation imports the installed package in its own interpreter. Alignment excludes source reading and repeats its calculation ten times; direct DataSource reads include image statistics; checked preparation includes decoding, checking, statistics and encoding four camera streams into a new cache. Reopening an existing cache is excluded.
+
+[Measured results and output equivalence](MCAP_OPS_RESULTS.md)
